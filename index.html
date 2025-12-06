@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <title>大会受付 - Start.gg / SheetToREST</title>
+  <title>AttendeesWebAppβ</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <!-- html5-qrcode CDN -->
@@ -214,15 +214,15 @@
 <body>
   <div class="page">
     <header>
-      <h1>大会受付システム（Start.gg / SheetToREST）</h1>
+      <h1>大会参加者受付用Webアプリ(β版)</h1>
       <p>QRコード読取 → 参加者情報表示 → 支払い調整 → チェックイン更新</p>
     </header>
 
     <div class="card" style="margin-top:12px;">
     <h2>API 設定</h2>
-    <label for="api-url-input" class="small">SheetToREST の URL（?action を除いた基本URL）</label>
+    <label for="api-url-input" class="small">SheetToREST の エンドポイントURL</label>
     <input id="api-url-input" placeholder="例: https://script.google.com/macros/s/XXXXX/exec" />
-    <button id="save-api-btn">API URL を設定</button>
+    <button id="save-api-btn">URL を設定</button>
     <div id="api-status" class="small"></div>
     </div>
 
@@ -263,7 +263,7 @@
 
           <div id="other-adjustment-area" style="display:none; margin-top: 6px;">
             <div class="select-row">
-              <label for="other-amount">その他：増減する金額（例: 1000 か -1000）</label>
+              <label for="other-amount">その他：増減する金額（例: 1000 や -1000）</label>
               <input type="number" id="other-amount" placeholder="例: 1000 なら追加徴収 / -1000 ならキャッシュバック" />
             </div>
             <div class="select-row">
@@ -274,12 +274,12 @@
 
           <div class="select-row" style="margin-top: 6px;">
             <label for="note-extra">編集メモ（任意・editnotesに追記されます）</label>
-            <textarea id="note-extra" placeholder="受付担当者の名前や一言メモなど"></textarea>
+            <textarea id="note-extra" placeholder="受付担当者の名前やメモなど"></textarea>
           </div>
 
           <button id="submit-btn" disabled>チェックイン完了として登録</button>
           <div class="small">
-            ※ チェックイン完了時に <code>ischeckin=TRUE</code> に更新し、調整内容は <code>editnotes</code> に追記されます。
+            ※ チェックイン完了時に <code>Checked In=TRUE</code> に更新し、調整内容は <code>editnotes</code> に追記されます。
           </div>
           <div class="log" id="log-area"></div>
         </div>
@@ -291,9 +291,6 @@
     // === 設定値（ここだけ必ずあなたの環境に合わせて変更） =======================
     // SheetToREST の Web アプリ URL（?action=one&id=... で1件取得できるエンドポイント）
     let API_BASE_URL = "";
-    // もしセキュリティ用トークンを実装しているなら、ここにクエリを追加する:
-    // 例: const API_EXTRA_QUERY = "&api_token=YOUR_TOKEN";
-    const API_EXTRA_QUERY = "";
     // =====================================================================
 
     // グローバル状態（ブラウザ内のみ）
@@ -365,7 +362,7 @@ window.addEventListener("load", () => {
       const gamerTag = record["GamerTag"] || "(不明)";
       const venueType = record["Venue Type"] || "";
       const adminNotes = record["Admin Notes"] || "";
-      const checkedInRaw = record["Checked In"] || record["ischeckin"] || "";
+      const checkedInRaw = record["Checked In"] || "";
       const totalOwed = parseIntSafe(record["Total Owed"]);
       const totalTransaction = parseIntSafe(record["Total Transaction"]);
       const balance = parseIntSafe(record["Balance"]);
@@ -376,10 +373,9 @@ window.addEventListener("load", () => {
           : '<span class="badge" style="border-color:#ff6347;color:#ffc4b5;">NOT CHECKED-IN</span>';
 
       // 対戦台番号の簡易抽出：Admin Notes 内に「台XX」形式がある想定（なければ空）
-      let stationText = "";
-      const stationMatch = adminNotes.match(/台\s*([A-Za-z0-9\-]+)/);
-      if (stationMatch && stationMatch[1]) {
-        stationText = stationMatch[1];
+      let stationText = "番台";
+      if (adminNotes != "") {
+        stationText = adminNotes + stationText;
       }
 
       const html = `
@@ -411,7 +407,7 @@ window.addEventListener("load", () => {
         </div>
         <div class="field-row">
           <div class="field-label">対戦台番号</div>
-          <div class="field-value">${stationText || "(Admin Notes参照)"}</div>
+          <div class="field-value">${stationText || "(指定なし)"}</div>
         </div>
         <div class="field-row">
           <div class="field-label">Admin Notes</div>
@@ -509,7 +505,7 @@ window.addEventListener("load", () => {
         </div>
         <div style="margin-top:4px;" class="small">
           ${statusLine}<br/>
-          <span>基本額の根拠：${baseLabel}</span><br/>
+          <span>基本額の計算理由：${baseLabel}</span><br/>
           <span>調整内容：${deltaLabel}</span>
         </div>
       `;
@@ -538,7 +534,7 @@ window.addEventListener("load", () => {
       scanStatusEl.textContent = `参加者ID ${id} を検索中...`;
 
       try {
-        const url = `${API_BASE_URL}?action=one&id=${encodeURIComponent(id)}${API_EXTRA_QUERY}`;
+        const url = `${API_BASE_URL}?action=one&id=${encodeURIComponent(id)}`;
         log(`GET ${url}`);
         const res = await fetch(url, { method: "GET" });
 
@@ -550,9 +546,9 @@ window.addEventListener("load", () => {
 
         if (data && data.error) {
           participantInfoEl.innerHTML =
-            `<div class="danger-text">エラー：${data.error}（シートに該当IDがない可能性）</div>`;
+            `<div class="danger-text">エラー：${data.error}（シートに該当IDがない可能性があります）</div>`;
           paymentPanelEl.className = "payment-panel payment-green";
-          paymentPanelEl.innerHTML = '<div class="small">参加者情報が取得できなかったため、支払い計算は行いません。</div>';
+          paymentPanelEl.innerHTML = '<div class="small">参加者情報が取得できなかったため、支払い計算を行えません。</div>';
           scanStatusEl.textContent = "QRを再度読み取ってください。";
           log(`Error from API: ${JSON.stringify(data)}`);
           return;
@@ -670,7 +666,7 @@ window.addEventListener("load", () => {
         `基本額: ${baseAmount} 円\n` +
         `調整額: ${delta >= 0 ? "+" + delta : delta} 円\n` +
         `最終的な支払額: ${finalAmount} 円\n\n` +
-        `ischeckin を TRUE に更新し、editnotes に調整内容を追記してよろしいですか？`;
+        `Checked In を TRUE に更新し、editnotes に調整内容を追記してよろしいですか？`;
 
       if (!window.confirm(confirmMessage)) {
         return;
@@ -690,7 +686,7 @@ window.addEventListener("load", () => {
           editnotes: newEditNotes
         };
 
-        const url = `${API_BASE_URL}?action=update&id=${encodeURIComponent(currentParticipantId)}${API_EXTRA_QUERY}`;
+        const url = `${API_BASE_URL}?action=update&id=${encodeURIComponent(currentParticipantId)}`;
         log(`POST ${url} payload=${JSON.stringify(payload)}`);
 
         const res = await fetch(url, {
@@ -714,7 +710,7 @@ window.addEventListener("load", () => {
         alert("チェックイン情報を更新しました。");
 
         // ローカル状態も更新して表示をリフレッシュ
-        currentRecord["ischeckin"] = "TRUE";
+        currentRecord["Checked In"] = "TRUE";
         currentRecord["editnotes"] = newEditNotes;
         updateParticipantInfoUI(currentRecord);
         computePaymentAndUpdateUI();
@@ -748,7 +744,7 @@ window.addEventListener("load", () => {
     }
 
     function onScanFailure(error) {
-      // デバッグしたい場合だけログする。毎フレーム呼ばれるので黙っておく方が無難。
+      // デバッグしたい場合だけログする。毎フレーム呼ばれる。
       // log(`Scan failure: ${error}`);
     }
 
@@ -771,4 +767,3 @@ window.addEventListener("load", () => {
   </script>
 </body>
 </html>
-
