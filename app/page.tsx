@@ -1,11 +1,27 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { collection, onSnapshot, orderBy, query, Unsubscribe } from "firebase/firestore";
 import { Html5QrcodeScanner } from "html5-qrcode";
 import clsx from "clsx";
 import Papa from "papaparse";
+import { ensureFirestoreClient } from "@/lib/firebaseClient";
 
-const pricingConfig = {
+type AdjustmentOption = {
+  key: string;
+  label: string;
+  deltaAmount: number;
+  requiresReason: boolean;
+};
+
+type PricingConfig = {
+  generalFee: number;
+  bringConsoleFee: number;
+  studentFixedFee: number;
+  adjustmentOptions: AdjustmentOption[];
+};
+
+const defaultPricingConfig: PricingConfig = {
   generalFee: 4000,
   bringConsoleFee: 3000,
   studentFixedFee: 1000,
@@ -74,13 +90,6 @@ type AuthSession = {
   };
 };
 
-type AdjustmentOption = {
-  key: string;
-  label: string;
-  deltaAmount: number;
-  requiresReason: boolean;
-};
-
 type PaymentStatus = {
   status: "prepaid" | "due" | "refund";
   amount: number;
@@ -100,9 +109,10 @@ function computePaymentStatus(
   studentDiscount: boolean,
   adjustment: AdjustmentOption,
   customDelta: number,
+  pricing: PricingConfig,
 ): PaymentStatus {
   const baseDue = participant.payment.totalTransaction !== 0 ? 0 : participant.payment.totalOwed;
-  const studentDue = studentDiscount ? pricingConfig.studentFixedFee : baseDue;
+  const studentDue = studentDiscount ? pricing.studentFixedFee : baseDue;
   const delta = adjustment.key === "other" ? customDelta : adjustment.deltaAmount;
   const amount = studentDue + delta;
   if (amount > 0) {
@@ -131,12 +141,20 @@ function formatTimestampJst(date: Date) {
 
 export default function HomePage() {
   const [activeTab, setActiveTab] = useState<"kiosk" | "operator" | "dashboard">("kiosk");
+  const [tournamentId, setTournamentId] = useState("demo-tournament");
+  const [pricingConfig, setPricingConfig] = useState<PricingConfig>(defaultPricingConfig);
+  const [pricingMessage, setPricingMessage] = useState("");
+  const [pricingSource, setPricingSource] = useState<string>("default");
+  const [pricingName, setPricingName] = useState("");
+  const [pricingSaving, setPricingSaving] = useState(false);
   const [participants, setParticipants] = useState<Participant[]>(initialParticipants);
+  const [firestoreReady, setFirestoreReady] = useState(false);
+  const [firestoreError, setFirestoreError] = useState("");
   const [scanResult, setScanResult] = useState<Participant | null>(null);
   const [scanRaw, setScanRaw] = useState("");
   const [scannerError, setScannerError] = useState("");
   const [studentDiscount, setStudentDiscount] = useState(false);
-  const [selectedAdjustment, setSelectedAdjustment] = useState(adjustmentOptions()[0].key);
+  const [selectedAdjustment, setSelectedAdjustment] = useState(defaultPricingConfig.adjustmentOptions[0].key);
   const [customReason, setCustomReason] = useState("");
   const [customAmount, setCustomAmount] = useState(0);
   const [operatorMessage, setOperatorMessage] = useState("");
@@ -147,8 +165,11 @@ export default function HomePage() {
   const [authError, setAuthError] = useState("");
 
   const adjustmentOption = useMemo(
-    () => adjustmentOptions().find((opt) => opt.key === selectedAdjustment) ?? adjustmentOptions()[0],
-    [selectedAdjustment],
+    () => {
+      const options = adjustmentOptions();
+      return options.find((opt) => opt.key === selectedAdjustment) ?? options[0];
+    },
+    [selectedAdjustment, pricingConfig],
   );
 
   useEffect(() => {
@@ -182,8 +203,151 @@ export default function HomePage() {
     refreshSession();
   }, []);
 
+  useEffect(() => {
+    loadPricingConfig(tournamentId);
+    // 初期ロードのみ実行
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    let unsubscribe: Unsubscribe | null = null;
+    setFirestoreError("");
+    setFirestoreReady(false);
+
+    const connect = async () => {
+      try {
+        const db = ensureFirestoreClient();
+        const q = query(
+          collection(db, "tournaments", tournamentId, "participants"),
+          orderBy("participantId"),
+        );
+
+        unsubscribe = onSnapshot(
+          q,
+          (snapshot) => {
+            const data = snapshot.docs.map((doc) => {
+              const d = doc.data() as any;
+              const checkedInAt = d.checkedInAt?.toDate ? d.checkedInAt.toDate().toISOString() : d.checkedInAt;
+              return {
+                participantId: doc.id,
+                playerName: d.playerName || doc.id,
+                adminNotes: d.adminNotes || "",
+                payment: {
+                  totalTransaction: d?.payment?.totalTransaction ?? 0,
+                  totalOwed: d?.payment?.totalOwed ?? 0,
+                  totalPaid: d?.payment?.totalPaid ?? 0,
+                },
+                checkedIn: Boolean(d.checkedIn),
+                checkedInAt: checkedInAt || undefined,
+                checkedInBy: d.checkedInBy || undefined,
+                editNotes: d.editNotes || "",
+              } as Participant;
+            });
+            setParticipants(data);
+            setFirestoreReady(true);
+          },
+          (error) => {
+            setFirestoreError(`リアルタイム取得に失敗しました: ${error.message}`);
+          },
+        );
+      } catch (error: any) {
+        setFirestoreError(error?.message || "Firestore クライアント初期化に失敗しました");
+      }
+    };
+
+    connect();
+
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, [tournamentId]);
+
+  useEffect(() => {
+    const exists = pricingConfig.adjustmentOptions.some((opt) => opt.key === selectedAdjustment);
+    if (!exists && pricingConfig.adjustmentOptions[0]) {
+      setSelectedAdjustment(pricingConfig.adjustmentOptions[0].key);
+    }
+  }, [pricingConfig, selectedAdjustment]);
+
   function adjustmentOptions(): AdjustmentOption[] {
     return pricingConfig.adjustmentOptions;
+  }
+
+  async function loadPricingConfig(targetId: string) {
+    setPricingMessage(`料金設定(${targetId})を取得中...`);
+    try {
+      const res = await fetch(`/api/tournaments/${encodeURIComponent(targetId)}/pricing`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || res.statusText);
+      const config = (data.pricingConfig as PricingConfig) || defaultPricingConfig;
+      setPricingConfig(config);
+      setPricingSource(data.source || "firestore");
+      setPricingName(data.name || "");
+      setSelectedAdjustment((config.adjustmentOptions[0]?.key) || "none");
+      setPricingMessage(`料金設定を読み込みました（source=${data.source || "firestore"}）`);
+    } catch (error: any) {
+      setPricingConfig(defaultPricingConfig);
+      setPricingSource("default");
+      setPricingMessage(`料金設定の取得に失敗しました: ${error?.message || "unknown"}`);
+    }
+  }
+
+  async function savePricingConfig() {
+    setPricingSaving(true);
+    setPricingMessage("料金設定を保存しています...");
+    try {
+      const res = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/pricing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pricingConfig, name: pricingName }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || res.statusText);
+      setPricingConfig(data.pricingConfig as PricingConfig);
+      setPricingSource("firestore");
+      setPricingMessage("料金設定をFirestoreに保存しました");
+    } catch (error: any) {
+      setPricingMessage(`保存に失敗しました: ${error?.message || "unknown"}`);
+    } finally {
+      setPricingSaving(false);
+    }
+  }
+
+  function updatePricingField(key: keyof PricingConfig, value: number) {
+    setPricingConfig((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function updateAdjustment(index: number, key: keyof AdjustmentOption, value: string | number | boolean) {
+    setPricingConfig((prev) => {
+      const next = [...prev.adjustmentOptions];
+      const target = next[index];
+      if (!target) return prev;
+      next[index] = { ...target, [key]: value } as AdjustmentOption;
+      return { ...prev, adjustmentOptions: next };
+    });
+  }
+
+  function addAdjustment() {
+    setPricingConfig((prev) => ({
+      ...prev,
+      adjustmentOptions: [
+        ...prev.adjustmentOptions,
+        {
+          key: `custom_${prev.adjustmentOptions.length + 1}`,
+          label: "新規オプション",
+          deltaAmount: 0,
+          requiresReason: false,
+        },
+      ],
+    }));
+  }
+
+  function removeAdjustment(index: number) {
+    setPricingConfig((prev) => {
+      if (prev.adjustmentOptions.length <= 1) return prev;
+      const next = prev.adjustmentOptions.filter((_, i) => i !== index);
+      return { ...prev, adjustmentOptions: next };
+    });
   }
 
   async function refreshSession() {
@@ -219,30 +383,32 @@ export default function HomePage() {
     handleLookup(scanRaw.trim());
   }
 
-  function handleCheckIn() {
+  async function handleCheckIn() {
     if (!scanResult) return;
     if (scanResult.checkedIn) return;
 
-    const timestamp = formatTimestampJst(new Date());
     const delta = adjustmentOption.key === "other" ? customAmount : adjustmentOption.deltaAmount;
     const reasonLabel = adjustmentOption.key === "other" ? `その他: ${customReason}` : adjustmentOption.label;
 
-    setParticipants((prev) =>
-      prev.map((p) => {
-        if (p.participantId !== scanResult.participantId) return p;
-        const noteEntry = delta !== 0 || adjustmentOption.requiresReason
-          ? `${timestamp} | ${reasonLabel} | ${delta >= 0 ? `+${delta}` : delta}円`
-          : undefined;
-        return {
-          ...p,
-          checkedIn: true,
-          checkedInAt: new Date().toISOString(),
-          checkedInBy: "operator-demo",
-          editNotes: noteEntry ? `${p.editNotes ? `${p.editNotes}\n` : ""}${noteEntry}` : p.editNotes,
-        };
-      }),
-    );
-    setOperatorMessage(`${getDisplayName(scanResult)} をチェックインしました`);
+    try {
+      const res = await fetch(
+        `/api/tournaments/${encodeURIComponent(tournamentId)}/participants/${encodeURIComponent(scanResult.participantId)}/checkin`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            deltaAmount: delta,
+            reasonLabel,
+            operatorUserId: authSession.user?.id || "operator-demo",
+          }),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || res.statusText);
+      setOperatorMessage(`${getDisplayName(scanResult)} をチェックインしました`);
+    } catch (error: any) {
+      setOperatorMessage(`チェックインに失敗しました: ${error?.message || "unknown"}`);
+    }
   }
 
   function handleCsvUpload(file: File) {
@@ -310,24 +476,17 @@ export default function HomePage() {
           return;
         }
 
-        setParticipants((prev) => {
-          const map = new Map(prev.map((p) => [p.participantId, p]));
-          importedParticipants.forEach((p) => {
-            const existing = map.get(p.participantId);
-            if (existing) {
-              map.set(p.participantId, {
-                ...existing,
-                ...p,
-                checkedIn: existing.checkedIn || p.checkedIn,
-              });
-            } else {
-              map.set(p.participantId, p);
-            }
-          });
-          return Array.from(map.values());
-        });
-
-        setOperatorMessage(`CSVを取り込みました（${importedParticipants.length}件）`);
+        fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/participants`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ participants: importedParticipants }),
+        })
+          .then(async (res) => {
+            const data = await res.json();
+            if (!res.ok) throw new Error(data?.error || res.statusText);
+            setOperatorMessage(`CSVをFirestoreに保存しました（${data.count}件）`);
+          })
+          .catch((err) => setOperatorMessage(`CSV保存に失敗しました: ${err.message}`));
       },
       error: () => setOperatorMessage("CSVの解析に失敗しました"),
     });
@@ -346,7 +505,7 @@ export default function HomePage() {
   }, [participants, searchTerm, filter]);
 
   const paymentStatus = scanResult
-    ? computePaymentStatus(scanResult, studentDiscount, adjustmentOption, customAmount)
+    ? computePaymentStatus(scanResult, studentDiscount, adjustmentOption, customAmount, pricingConfig)
     : null;
 
   const disableSubmit = !scanResult || scanResult.checkedIn ||
@@ -487,6 +646,140 @@ export default function HomePage() {
       {activeTab === "operator" && (
         <div className="card-grid">
           <div className="card">
+            <div className="section-title">Firestore リアルタイム同期</div>
+            {firestoreReady ? (
+              <div className="toast success">参加者データをリアルタイム購読中（{tournamentId}）</div>
+            ) : (
+              <div className="toast">Firestore クライアント設定を確認してください</div>
+            )}
+            {firestoreError && <div className="toast danger">{firestoreError}</div>}
+            <p className="muted">NEXT_PUBLIC_FIREBASE_* でクライアント設定し、Firestore セキュリティルールで適切に保護してください。</p>
+          </div>
+
+          <div className="card">
+            <div className="section-title">大会ごとの料金設定（Firestore 保存）</div>
+            <p className="muted">トーナメントID単位で pricingConfig を保存・取得します。Firestore に保存した設定がチェックイン計算に反映されます。</p>
+            <div className="stack">
+              <label className="label" htmlFor="tournament-id">トーナメントID (例: evo-japan-2025)</label>
+              <input
+                id="tournament-id"
+                className="input"
+                value={tournamentId}
+                onChange={(e) => setTournamentId(e.target.value)}
+                placeholder="tournament-identifier"
+              />
+              <label className="label" htmlFor="tournament-name">大会名（任意でFirestoreに保存）</label>
+              <input
+                id="tournament-name"
+                className="input"
+                value={pricingName}
+                onChange={(e) => setPricingName(e.target.value)}
+                placeholder="大会名"
+              />
+              <div className="flex" style={{ gap: 8, flexWrap: "wrap" }}>
+                <button className="button" type="button" onClick={() => loadPricingConfig(tournamentId)}>
+                  Firestoreから取得
+                </button>
+                <button className="button" type="button" onClick={savePricingConfig} disabled={pricingSaving}>
+                  {pricingSaving ? "保存中..." : "Firestoreへ保存"}
+                </button>
+                <span className="muted">取得元: {pricingSource}</span>
+              </div>
+              {pricingMessage && <div className="toast">{pricingMessage}</div>}
+            </div>
+
+            <div className="divider" />
+            <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+              <div className="stack">
+                <label className="label" htmlFor="general-fee">一般料金</label>
+                <input
+                  id="general-fee"
+                  className="input"
+                  type="number"
+                  value={pricingConfig.generalFee}
+                  onChange={(e) => updatePricingField("generalFee", Number(e.target.value))}
+                />
+              </div>
+              <div className="stack">
+                <label className="label" htmlFor="bring-fee">持参料金</label>
+                <input
+                  id="bring-fee"
+                  className="input"
+                  type="number"
+                  value={pricingConfig.bringConsoleFee}
+                  onChange={(e) => updatePricingField("bringConsoleFee", Number(e.target.value))}
+                />
+              </div>
+              <div className="stack">
+                <label className="label" htmlFor="student-fee">学割 (固定)</label>
+                <input
+                  id="student-fee"
+                  className="input"
+                  type="number"
+                  value={pricingConfig.studentFixedFee}
+                  onChange={(e) => updatePricingField("studentFixedFee", Number(e.target.value))}
+                />
+              </div>
+            </div>
+
+            <div className="divider" />
+            <div className="section-title">差額オプション</div>
+            <div className="stack" style={{ gap: 12 }}>
+              {pricingConfig.adjustmentOptions.map((opt, index) => (
+                <div key={opt.key || index} className="card" style={{ background: "#0d1117" }}>
+                  <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8 }}>
+                    <div className="stack">
+                      <label className="label">キー</label>
+                      <input
+                        className="input"
+                        value={opt.key}
+                        onChange={(e) => updateAdjustment(index, "key", e.target.value)}
+                      />
+                    </div>
+                    <div className="stack">
+                      <label className="label">ラベル</label>
+                      <input
+                        className="input"
+                        value={opt.label}
+                        onChange={(e) => updateAdjustment(index, "label", e.target.value)}
+                      />
+                    </div>
+                    <div className="stack">
+                      <label className="label">増減金額</label>
+                      <input
+                        className="input"
+                        type="number"
+                        value={opt.deltaAmount}
+                        onChange={(e) => updateAdjustment(index, "deltaAmount", Number(e.target.value))}
+                      />
+                    </div>
+                    <div className="stack">
+                      <label className="label">理由必須</label>
+                      <div className="flex" style={{ gap: 8 }}>
+                        <input
+                          type="checkbox"
+                          checked={opt.requiresReason}
+                          onChange={(e) => updateAdjustment(index, "requiresReason", e.target.checked)}
+                        />
+                        <span className="muted">その他など理由入力必須にする</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex-between" style={{ marginTop: 6 }}>
+                    <span className="muted">表示例: {opt.label} / {opt.deltaAmount}円</span>
+                    {pricingConfig.adjustmentOptions.length > 1 && (
+                      <button className="button secondary" type="button" onClick={() => removeAdjustment(index)}>
+                        削除
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+              <button className="button" type="button" onClick={addAdjustment}>オプションを追加</button>
+            </div>
+          </div>
+
+          <div className="card">
             <div className="section-title">start.gg OAuth2 ログイン</div>
             <p className="muted">Authorization Code Flow で start.gg にリダイレクトし、アクセストークンをサーバーで交換・保存します。</p>
             <div className="stack">
@@ -556,7 +849,13 @@ export default function HomePage() {
             </thead>
             <tbody>
               {filteredParticipants.map((p) => {
-                const status = computePaymentStatus(p, false, { key: "none", label: "変更なし", deltaAmount: 0, requiresReason: false }, 0);
+                const status = computePaymentStatus(
+                  p,
+                  false,
+                  { key: "none", label: "変更なし", deltaAmount: 0, requiresReason: false },
+                  0,
+                  pricingConfig,
+                );
                 return (
                   <tr key={p.participantId}>
                     <td>{p.participantId}</td>

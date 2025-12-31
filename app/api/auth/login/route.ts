@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 
-const AUTH_URL = "https://api.start.gg/oauth/authorize";
+const AUTH_URL = "https://start.gg/oauth/authorize";
 
 export async function GET(request: NextRequest) {
   const clientId = process.env.STARTGG_CLIENT_ID;

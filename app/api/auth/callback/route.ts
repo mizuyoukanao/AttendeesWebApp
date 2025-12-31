@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const TOKEN_URL = "https://api.start.gg/oauth/token";
+const TOKEN_URL = "https://api.start.gg/oauth/access_token";
 const GRAPHQL_URL = "https://api.start.gg/gql/alpha";
 
 async function exchangeCodeForToken(code: string, redirectUri: string) {
