@@ -90,6 +90,16 @@ type AuthSession = {
   };
 };
 
+type ManagedTournament = {
+  id: string;
+  name: string;
+  slug?: string;
+  startAt?: number;
+  city?: string;
+  addrState?: string;
+  countryCode?: string;
+};
+
 type PaymentStatus = {
   status: "prepaid" | "due" | "refund";
   amount: number;
@@ -139,6 +149,14 @@ function formatTimestampJst(date: Date) {
   return `${yyyy}-${mm}-${dd} ${hh}:${min} JST`;
 }
 
+function describeTournament(t: ManagedTournament) {
+  const location = [t.city, t.addrState, t.countryCode].filter(Boolean).join(" / ");
+  const startDate = t.startAt ? new Date(t.startAt * 1000).toLocaleDateString("ja-JP") : "";
+  const name = t.name || t.slug || t.id;
+  const suffix = [startDate, location].filter(Boolean).join(" | ");
+  return suffix ? `${name} (${suffix})` : name;
+}
+
 export default function HomePage() {
   const [activeTab, setActiveTab] = useState<"kiosk" | "operator" | "dashboard">("kiosk");
   const [tournamentId, setTournamentId] = useState("demo-tournament");
@@ -163,6 +181,10 @@ export default function HomePage() {
   const scannerContainerRef = useRef<HTMLDivElement>(null);
   const [authSession, setAuthSession] = useState<AuthSession>({ authenticated: false });
   const [authError, setAuthError] = useState("");
+  const [managedTournaments, setManagedTournaments] = useState<ManagedTournament[]>([]);
+  const [tournamentLoading, setTournamentLoading] = useState(false);
+  const [tournamentMessage, setTournamentMessage] = useState("");
+  const [tournamentError, setTournamentError] = useState("");
 
   const adjustmentOption = useMemo(
     () => {
@@ -204,15 +226,31 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
-    loadPricingConfig(tournamentId);
-    // 初期ロードのみ実行
+    if (authSession.authenticated) {
+      fetchManagedTournaments();
+    } else {
+      setManagedTournaments([]);
+      setTournamentMessage("");
+      setTournamentError("");
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [authSession.authenticated]);
+
+  useEffect(() => {
+    if (!tournamentId) return;
+    loadPricingConfig(tournamentId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tournamentId]);
 
   useEffect(() => {
     let unsubscribe: Unsubscribe | null = null;
     setFirestoreError("");
     setFirestoreReady(false);
+
+    if (!tournamentId) {
+      setParticipants([]);
+      return () => undefined;
+    }
 
     const connect = async () => {
       try {
@@ -365,6 +403,46 @@ export default function HomePage() {
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     setAuthSession({ authenticated: false });
+    setManagedTournaments([]);
+    setTournamentMessage("");
+    setTournamentError("");
+  }
+
+  async function fetchManagedTournaments() {
+    setTournamentLoading(true);
+    setTournamentError("");
+    setTournamentMessage("start.gg から大会を取得しています...");
+
+    try {
+      const res = await fetch("/api/startgg/tournaments");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || res.statusText);
+
+      const tournaments = (data.tournaments as ManagedTournament[]) || [];
+      setManagedTournaments(tournaments);
+
+      if ((tournamentId === "demo-tournament" || !tournamentId) && tournaments[0]?.id) {
+        setTournamentId(tournaments[0].id);
+        if (tournaments[0].name) {
+          setPricingName((prev) => prev || tournaments[0].name || "");
+        }
+      }
+
+      setTournamentMessage(`${tournaments.length}件の大会を取得しました`);
+    } catch (error: any) {
+      setTournamentError(error?.message || "大会リストの取得に失敗しました");
+      setTournamentMessage("");
+    } finally {
+      setTournamentLoading(false);
+    }
+  }
+
+  function handleTournamentSelect(value: string) {
+    setTournamentId(value);
+    const matched = managedTournaments.find((t) => t.id === value);
+    if (matched?.name) {
+      setPricingName((prev) => prev || matched.name || "");
+    }
   }
 
   function handleLookup(raw: string) {
@@ -386,6 +464,10 @@ export default function HomePage() {
   async function handleCheckIn() {
     if (!scanResult) return;
     if (scanResult.checkedIn) return;
+    if (!tournamentId) {
+      setScannerError("大会を選択してください");
+      return;
+    }
 
     const delta = adjustmentOption.key === "other" ? customAmount : adjustmentOption.deltaAmount;
     const reasonLabel = adjustmentOption.key === "other" ? `その他: ${customReason}` : adjustmentOption.label;
@@ -412,6 +494,10 @@ export default function HomePage() {
   }
 
   function handleCsvUpload(file: File) {
+    if (!tournamentId) {
+      setOperatorMessage("大会を選択してください");
+      return;
+    }
     setOperatorMessage("CSVを解析しています...");
     Papa.parse(file, {
       skipEmptyLines: "greedy",
@@ -508,7 +594,7 @@ export default function HomePage() {
     ? computePaymentStatus(scanResult, studentDiscount, adjustmentOption, customAmount, pricingConfig)
     : null;
 
-  const disableSubmit = !scanResult || scanResult.checkedIn ||
+  const disableSubmit = !tournamentId || !scanResult || scanResult.checkedIn ||
     (adjustmentOption.requiresReason && (!customReason.trim() || customAmount === 0));
 
   return (
@@ -538,6 +624,50 @@ export default function HomePage() {
           ))}
         </div>
       </header>
+
+      <div className="card">
+        <div className="section-title">start.gg 管理大会の選択</div>
+        <p className="muted">
+          start.gg の OAuth2 ログイン後、マネージャー権限を持つ大会を取得してチェックイン/CSV/ダッシュボードで使用する大会 ID を選択できます。
+        </p>
+        <div className="stack" style={{ gap: 8 }}>
+          <div className="flex" style={{ gap: 8, flexWrap: "wrap" }}>
+            <button className="button" type="button" onClick={fetchManagedTournaments} disabled={!authSession.authenticated || tournamentLoading}>
+              {tournamentLoading ? "取得中..." : "start.gg から大会を取得"}
+            </button>
+            <span className="muted">ログイン済みの場合のみ取得できます</span>
+          </div>
+          <label className="label" htmlFor="tournament-select">管理権限のある大会を選択</label>
+          <select
+            id="tournament-select"
+            className="select"
+            value={tournamentId}
+            onChange={(e) => handleTournamentSelect(e.target.value)}
+            disabled={tournamentLoading || managedTournaments.length === 0}
+          >
+            <option value="">start.gg で取得した大会を選択</option>
+            {managedTournaments.map((tournament) => (
+              <option key={tournament.id} value={tournament.id}>
+                {describeTournament(tournament)} [{tournament.id}]
+              </option>
+            ))}
+            {tournamentId && !managedTournaments.some((t) => t.id === tournamentId) && (
+              <option value={tournamentId}>カスタム選択: {tournamentId}</option>
+            )}
+          </select>
+          <label className="label" htmlFor="tournament-id">手動で大会IDを指定（start.gg 未取得時のフォールバック）</label>
+          <input
+            id="tournament-id"
+            className="input"
+            value={tournamentId}
+            onChange={(e) => handleTournamentSelect(e.target.value)}
+            placeholder="tournament-identifier"
+          />
+          <div className="muted">選択した大会 ID がチェックイン処理・ダッシュボード表示・CSVアップロードの対象になります。</div>
+          {tournamentMessage && <div className="toast success">{tournamentMessage}</div>}
+          {tournamentError && <div className="toast danger">{tournamentError}</div>}
+        </div>
+      </div>
 
       {activeTab === "kiosk" && (
         <div className="card-grid">
@@ -660,12 +790,12 @@ export default function HomePage() {
             <div className="section-title">大会ごとの料金設定（Firestore 保存）</div>
             <p className="muted">トーナメントID単位で pricingConfig を保存・取得します。Firestore に保存した設定がチェックイン計算に反映されます。</p>
             <div className="stack">
-              <label className="label" htmlFor="tournament-id">トーナメントID (例: evo-japan-2025)</label>
+              <label className="label" htmlFor="pricing-tournament-id">トーナメントID (例: evo-japan-2025)</label>
               <input
-                id="tournament-id"
+                id="pricing-tournament-id"
                 className="input"
                 value={tournamentId}
-                onChange={(e) => setTournamentId(e.target.value)}
+                onChange={(e) => handleTournamentSelect(e.target.value)}
                 placeholder="tournament-identifier"
               />
               <label className="label" htmlFor="tournament-name">大会名（任意でFirestoreに保存）</label>
@@ -787,7 +917,10 @@ export default function HomePage() {
               <div className="muted">リダイレクト後、GraphQL API で currentUser を取得し cookie に保存します。</div>
               {authSession.authenticated ? (
                 <div className="toast success">
-                  <div>ログイン済み: {authSession.user?.gamerTag || authSession.user?.email || authSession.user?.id}</div>
+                  <div>
+                    ログイン済み: <span style={{ fontWeight: 700 }}>{authSession.user?.gamerTag || "ゲーマータグ未取得"}</span>
+                    {authSession.user?.slug ? ` (start.gg/${authSession.user.slug})` : ""}
+                  </div>
                   <div className="flex" style={{ gap: 8 }}>
                     <button className="button" onClick={refreshSession}>状態を再取得</button>
                     <button className="button secondary" onClick={logout}>ログアウト</button>
