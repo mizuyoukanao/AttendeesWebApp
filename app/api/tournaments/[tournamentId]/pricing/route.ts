@@ -41,7 +41,7 @@ function normalizeAdjustment(input: any): AdjustmentOption {
 
 function normalizePricingConfig(input: any): PricingConfig {
   const adjustmentOptions = Array.isArray(input?.adjustmentOptions)
-    ? input.adjustmentOptions.map(normalizeAdjustment).filter((opt) => opt.key && opt.label)
+    ? input.adjustmentOptions.map(normalizeAdjustment).filter((opt: AdjustmentOption) => opt.key && opt.label)
     : defaultPricingConfig.adjustmentOptions;
 
   return {
