@@ -204,7 +204,7 @@ export default function HomePage() {
     const elementId = scannerContainerRef.current.id || "qr-reader";
     scannerContainerRef.current.id = elementId;
 
-    const scanner = new Html5QrcodeScanner(elementId, { fps: 10, qrbox: 240 });
+    const scanner = new Html5QrcodeScanner(elementId, { fps: 10, qrbox: 240 }, false);
     scanner.render(
       (decoded) => {
         setScannerError("");
@@ -285,11 +285,11 @@ export default function HomePage() {
             setFirestoreReady(true);
           },
           (error) => {
-            setFirestoreError(`リアルタイム取得に失敗しました: ${error.message}`);
+            setFirestoreError(`データベース取得に失敗しました: ${error.message}`);
           },
         );
       } catch (error: any) {
-        setFirestoreError(error?.message || "Firestore クライアント初期化に失敗しました");
+        setFirestoreError(error?.message || "データベースの処理に失敗しました");
       }
     };
 
@@ -322,7 +322,7 @@ export default function HomePage() {
       setPricingSource(data.source || "firestore");
       setPricingName(data.name || "");
       setSelectedAdjustment((config.adjustmentOptions[0]?.key) || "none");
-      setPricingMessage(`料金設定を読み込みました（source=${data.source || "firestore"}）`);
+      setPricingMessage(`料金設定を読み込みました`);
     } catch (error: any) {
       setPricingConfig(defaultPricingConfig);
       setPricingSource("default");
@@ -343,7 +343,7 @@ export default function HomePage() {
       if (!res.ok) throw new Error(data?.error || res.statusText);
       setPricingConfig(data.pricingConfig as PricingConfig);
       setPricingSource("firestore");
-      setPricingMessage("料金設定をFirestoreに保存しました");
+      setPricingMessage("料金設定をデータベースに保存しました");
     } catch (error: any) {
       setPricingMessage(`保存に失敗しました: ${error?.message || "unknown"}`);
     } finally {
@@ -449,7 +449,7 @@ export default function HomePage() {
     const participantId = parseParticipantIdFromQr(raw);
     if (!participantId) {
       setScanResult(null);
-      setScannerError("QRからparticipantIdを取得できませんでした");
+      setScannerError("QRから参加者IDを取得できませんでした");
       return;
     }
     const participant = participants.find((p) => p.participantId === participantId) || null;
@@ -498,7 +498,7 @@ export default function HomePage() {
       setOperatorMessage("大会を選択してください");
       return;
     }
-    setOperatorMessage("CSVを解析しています...");
+    setOperatorMessage("CSVを解析・アップロードしています...");
     Papa.parse(file, {
       skipEmptyLines: "greedy",
       complete: (results) => {
@@ -570,7 +570,7 @@ export default function HomePage() {
           .then(async (res) => {
             const data = await res.json();
             if (!res.ok) throw new Error(data?.error || res.statusText);
-            setOperatorMessage(`CSVをFirestoreに保存しました（${data.count}件）`);
+            setOperatorMessage(`CSVをデータベースに保存しました（${data.count}件）`);
           })
           .catch((err) => setOperatorMessage(`CSV保存に失敗しました: ${err.message}`));
       },
@@ -603,14 +603,14 @@ export default function HomePage() {
         <div className="brand">
           <div className="logo">GG</div>
           <div>
-            <div style={{ fontWeight: 800, fontSize: 22 }}>start.gg チェックイン</div>
+            <div style={{ fontWeight: 800, fontSize: 22 }}>AttendeesWebApp</div>
             <div className="muted">QRスキャン / CSVアップロード / ダッシュボード</div>
           </div>
         </div>
         <div className="tablist" role="tablist">
           {[
-            { key: "kiosk", label: "受付スキャン" },
-            { key: "operator", label: "運営アップロード" },
+            { key: "kiosk", label: "受付・QRスキャン" },
+            { key: "operator", label: "運営ログイン・CSVアップロード" },
             { key: "dashboard", label: "ダッシュボード" },
           ].map((tab) => (
             <button
@@ -626,9 +626,9 @@ export default function HomePage() {
       </header>
 
       <div className="card">
-        <div className="section-title">start.gg 管理大会の選択</div>
+        <div className="section-title">start.gg 大会の選択</div>
         <p className="muted">
-          start.gg の OAuth2 ログイン後、マネージャー権限を持つ大会を取得してチェックイン/CSV/ダッシュボードで使用する大会 ID を選択できます。
+          start.ggのアカウントでログイン後、マネージャー以上の権限を持つ大会を取得してチェックイン/CSVアップロード/ダッシュボードで使用する大会 ID を選択できます。
         </p>
         <div className="stack" style={{ gap: 8 }}>
           <div className="flex" style={{ gap: 8, flexWrap: "wrap" }}>
@@ -637,7 +637,7 @@ export default function HomePage() {
             </button>
             <span className="muted">ログイン済みの場合のみ取得できます</span>
           </div>
-          <label className="label" htmlFor="tournament-select">管理権限のある大会を選択</label>
+          <label className="label" htmlFor="tournament-select">マネージャー以上の権限のある大会を選択</label>
           <select
             id="tournament-select"
             className="select"
@@ -645,7 +645,7 @@ export default function HomePage() {
             onChange={(e) => handleTournamentSelect(e.target.value)}
             disabled={tournamentLoading || managedTournaments.length === 0}
           >
-            <option value="">start.gg で取得した大会を選択</option>
+            <option value="">start.gg から取得した大会を選択</option>
             {managedTournaments.map((tournament) => (
               <option key={tournament.id} value={tournament.id}>
                 {describeTournament(tournament)} [{tournament.id}]
@@ -655,7 +655,7 @@ export default function HomePage() {
               <option value={tournamentId}>カスタム選択: {tournamentId}</option>
             )}
           </select>
-          <label className="label" htmlFor="tournament-id">手動で大会IDを指定（start.gg 未取得時のフォールバック）</label>
+          <label className="label" htmlFor="tournament-id">手動で大会IDを指定（start.ggから取得不可時のフォールバック）</label>
           <input
             id="tournament-id"
             className="input"
@@ -663,7 +663,7 @@ export default function HomePage() {
             onChange={(e) => handleTournamentSelect(e.target.value)}
             placeholder="tournament-identifier"
           />
-          <div className="muted">選択した大会 ID がチェックイン処理・ダッシュボード表示・CSVアップロードの対象になります。</div>
+          <div className="muted">選択した大会IDがチェックイン処理・ダッシュボード表示・CSVアップロードの対象になります。</div>
           {tournamentMessage && <div className="toast success">{tournamentMessage}</div>}
           {tournamentError && <div className="toast danger">{tournamentError}</div>}
         </div>
@@ -681,7 +681,7 @@ export default function HomePage() {
               className="input"
               value={scanRaw}
               onChange={(e) => setScanRaw(e.target.value)}
-              placeholder="http://www.start.gg/api/-/gg_api./participant/102/qr?token=..."
+              placeholder="http://www.start.gg/api/-/gg_api./participant/01234567/qr?token=..."
             />
             <div className="flex" style={{ marginTop: 8 }}>
               <button className="button" onClick={handleManualLookup}>参加者を照合</button>
@@ -696,7 +696,7 @@ export default function HomePage() {
                 <div className="flex-between">
                   <div style={{ fontSize: 20, fontWeight: 800 }}>{getDisplayName(scanResult)}</div>
                   {scanResult.checkedIn ? (
-                    <span className="status success">チェックイン済み</span>
+                    <span className="status success">チェックイン済</span>
                   ) : (
                     <span className={clsx("status", paymentStatus?.status === "prepaid" ? "success" : "danger")}>{paymentStatus?.label}</span>
                   )}
@@ -718,10 +718,10 @@ export default function HomePage() {
                     checked={studentDiscount}
                     onChange={(e) => setStudentDiscount(e.target.checked)}
                   />
-                  <label htmlFor="student" className="muted">学割を適用（当日支払 1,000円）</label>
+                  <label htmlFor="student" className="muted">学割を適用</label>
                 </div>
 
-                <label className="label" htmlFor="adjustment">枠変更・差額</label>
+                <label className="label" htmlFor="adjustment">枠・金額変更</label>
                 <select
                   id="adjustment"
                   className="select"
@@ -741,9 +741,9 @@ export default function HomePage() {
                       className="input"
                       value={customReason}
                       onChange={(e) => setCustomReason(e.target.value)}
-                      placeholder="枠変更理由を入力"
+                      placeholder="変更理由を入力"
                     />
-                    <label className="label" htmlFor="custom-amount">増減金額（例: -1000 or 500）</label>
+                    <label className="label" htmlFor="custom-amount">増減金額（例: -1000, 500）</label>
                     <input
                       id="custom-amount"
                       className="input"
@@ -755,7 +755,7 @@ export default function HomePage() {
                 )}
 
                 <div className="flex-between" style={{ marginTop: 6 }}>
-                  <div className="muted">背景色ルール：支払い不要=緑 / 支払い・返金=赤</div>
+                  <div className="muted">確認が終わったら、チェックイン確定ボタンを押してください。</div>
                   {paymentStatus && (
                     <span className={clsx("status", paymentStatus.status === "prepaid" ? "success" : "danger")}>{paymentStatus.label}</span>
                   )}
@@ -764,7 +764,7 @@ export default function HomePage() {
                 <button className="button" disabled={disableSubmit} onClick={handleCheckIn}>
                   チェックイン確定
                 </button>
-                {scanResult.checkedIn && <div className="muted">再チェックインは無効化されています</div>}
+                {scanResult.checkedIn && <div className="muted">既にチェックインされています</div>}
               </div>
             ) : (
               <div className="muted">QRを読み取ると参加者情報が表示されます</div>
@@ -776,29 +776,29 @@ export default function HomePage() {
       {activeTab === "operator" && (
         <div className="card-grid">
           <div className="card">
-            <div className="section-title">Firestore リアルタイム同期</div>
+            <div className="section-title">データベース リアルタイム同期</div>
             {firestoreReady ? (
-              <div className="toast success">参加者データをリアルタイム購読中（{tournamentId}）</div>
+              <div className="toast success">参加者データをリアルタイム同期中（{tournamentId}）</div>
             ) : (
-              <div className="toast">Firestore クライアント設定を確認してください</div>
+              <div className="toast">データベースの設定を確認してください</div>
             )}
             {firestoreError && <div className="toast danger">{firestoreError}</div>}
-            <p className="muted">NEXT_PUBLIC_FIREBASE_* でクライアント設定し、Firestore セキュリティルールで適切に保護してください。</p>
+            <p className="muted">もしデータベースが正しく取得できない場合は、管理者にお問い合わせください。</p>
           </div>
 
           <div className="card">
-            <div className="section-title">大会ごとの料金設定（Firestore 保存）</div>
-            <p className="muted">トーナメントID単位で pricingConfig を保存・取得します。Firestore に保存した設定がチェックイン計算に反映されます。</p>
+            <div className="section-title">大会ごとの料金設定（データベース保存）</div>
+            <p className="muted">トーナメントごとに料金設定を保存・取得します。データベースに保存した設定がチェックイン時の金額計算に反映されます。</p>
             <div className="stack">
-              <label className="label" htmlFor="pricing-tournament-id">トーナメントID (例: evo-japan-2025)</label>
+              <label className="label" htmlFor="pricing-tournament-id">トーナメントID (例: 012345)</label>
               <input
                 id="pricing-tournament-id"
                 className="input"
                 value={tournamentId}
                 onChange={(e) => handleTournamentSelect(e.target.value)}
-                placeholder="tournament-identifier"
+                placeholder="トーナメントID"
               />
-              <label className="label" htmlFor="tournament-name">大会名（任意でFirestoreに保存）</label>
+              <label className="label" htmlFor="tournament-name">大会名（任意でデータベースに保存）</label>
               <input
                 id="tournament-name"
                 className="input"
@@ -808,12 +808,12 @@ export default function HomePage() {
               />
               <div className="flex" style={{ gap: 8, flexWrap: "wrap" }}>
                 <button className="button" type="button" onClick={() => loadPricingConfig(tournamentId)}>
-                  Firestoreから取得
+                  データベースから取得
                 </button>
                 <button className="button" type="button" onClick={savePricingConfig} disabled={pricingSaving}>
-                  {pricingSaving ? "保存中..." : "Firestoreへ保存"}
+                  {pricingSaving ? "保存中..." : "データベースへ保存"}
                 </button>
-                <span className="muted">取得元: {pricingSource}</span>
+                <span className="muted">取得元: データベース</span>
               </div>
               {pricingMessage && <div className="toast">{pricingMessage}</div>}
             </div>
@@ -841,7 +841,7 @@ export default function HomePage() {
                 />
               </div>
               <div className="stack">
-                <label className="label" htmlFor="student-fee">学割 (固定)</label>
+                <label className="label" htmlFor="student-fee">学割料金</label>
                 <input
                   id="student-fee"
                   className="input"
@@ -859,7 +859,7 @@ export default function HomePage() {
                 <div key={opt.key || index} className="card" style={{ background: "#0d1117" }}>
                   <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8 }}>
                     <div className="stack">
-                      <label className="label">キー</label>
+                      <label className="label">サーバー保存キー</label>
                       <input
                         className="input"
                         value={opt.key}
@@ -884,14 +884,14 @@ export default function HomePage() {
                       />
                     </div>
                     <div className="stack">
-                      <label className="label">理由必須</label>
+                      <label className="label">理由入力</label>
                       <div className="flex" style={{ gap: 8 }}>
                         <input
                           type="checkbox"
                           checked={opt.requiresReason}
                           onChange={(e) => updateAdjustment(index, "requiresReason", e.target.checked)}
                         />
-                        <span className="muted">その他など理由入力必須にする</span>
+                        <span className="muted">増減した理由などの入力を必須にする</span>
                       </div>
                     </div>
                   </div>
@@ -910,16 +910,15 @@ export default function HomePage() {
           </div>
 
           <div className="card">
-            <div className="section-title">start.gg OAuth2 ログイン</div>
-            <p className="muted">Authorization Code Flow で start.gg にリダイレクトし、アクセストークンをサーバーで交換・保存します。</p>
+            <div className="section-title">start.gg ログイン</div>
+            <p className="muted">start.gg にリダイレクトします。</p>
             <div className="stack">
               <a className="button" href="/api/auth/login">start.gg でログイン</a>
-              <div className="muted">リダイレクト後、GraphQL API で currentUser を取得し cookie に保存します。</div>
+              <div className="muted">ログイン後、マネージャー以上の権限がある大会のリストが有効化されます。</div>
               {authSession.authenticated ? (
                 <div className="toast success">
                   <div>
-                    ログイン済み: <span style={{ fontWeight: 700 }}>{authSession.user?.gamerTag || "ゲーマータグ未取得"}</span>
-                    {authSession.user?.slug ? ` (start.gg/${authSession.user.slug})` : ""}
+                    Startggアカウントでログイン済です。
                   </div>
                   <div className="flex" style={{ gap: 8 }}>
                     <button className="button" onClick={refreshSession}>状態を再取得</button>
@@ -927,7 +926,7 @@ export default function HomePage() {
                   </div>
                 </div>
               ) : (
-                <div className="toast">未ログイン。上のボタンから start.gg へ遷移してください。</div>
+                <div className="toast">未ログインです。上のボタンからログインを行ってください。</div>
               )}
               {authError && <div className="toast danger">{authError}</div>}
             </div>
@@ -935,7 +934,7 @@ export default function HomePage() {
 
           <div className="card">
             <div className="section-title">参加者CSVアップロード</div>
-            <p className="muted">ヘッダー検出後、ホワイトリスト列のみ取り込み（Id/GamerTag/Short GamerTag/Admin Notes/Checked In/Total Owed/Total Paid/Total Transaction）。</p>
+            <p className="muted">参加者情報をCSVから取得し、データベースへアップロードします。台番号を指定したい場合は、CSV内の「Admin Notes」列に記入してください。</p>
             <input
               type="file"
               accept=".csv,text/csv"
@@ -947,7 +946,7 @@ export default function HomePage() {
             />
             {operatorMessage && <div className="toast" style={{ marginTop: 8 }}>{operatorMessage}</div>}
             <div className="divider" />
-            <div className="muted">個人情報列はクライアント側で破棄されます。既存 participantId があれば checkedIn=true は維持したまま上書きします。</div>
+            <div className="muted">個人情報はアップロード前に破棄されます。CSVが再アップロードされた際は、チェックイン状況のみ維持したまま上書きします。</div>
           </div>
         </div>
       )}
@@ -974,7 +973,7 @@ export default function HomePage() {
               <tr>
                 <th>ID</th>
                 <th>プレイヤー名</th>
-                <th>台番号 (Admin Notes)</th>
+                <th>台番号</th>
                 <th>支払い</th>
                 <th>チェックイン</th>
                 <th>editNotes</th>
