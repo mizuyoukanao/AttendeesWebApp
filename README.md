@@ -1,6 +1,6 @@
 # AttendeesWebApp
 
-start.gg 連携のチェックインキオスクと運営ダッシュボードの Next.js デモです。
+start.gg 連携のチェックインページと運営ダッシュボードの Next.js デモです。
 
 ## セットアップ
 
