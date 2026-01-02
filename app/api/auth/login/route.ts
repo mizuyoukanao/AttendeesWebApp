@@ -6,7 +6,7 @@ const AUTH_URL = "https://start.gg/oauth/authorize";
 export async function GET(request: NextRequest) {
   const clientId = process.env.STARTGG_CLIENT_ID;
   const redirectUri = process.env.STARTGG_REDIRECT_URI;
-  const scope = process.env.STARTGG_OAUTH_SCOPE || "identity tournaments:read";
+  const scope = process.env.STARTGG_OAUTH_SCOPE || "user.identity tournament.manager";
 
   if (!clientId || !redirectUri) {
     return NextResponse.json({ error: "OAuthクライアント環境変数が未設定です" }, { status: 500 });
