@@ -158,7 +158,7 @@ function describeTournament(t: ManagedTournament) {
 }
 
 export default function HomePage() {
-  const [activeTab, setActiveTab] = useState<"kiosk" | "operator" | "dashboard">("kiosk");
+  const [activeTab, setActiveTab] = useState<"mobile" | "kiosk" | "operator" | "dashboard">("mobile");
   const [tournamentId, setTournamentId] = useState("demo-tournament");
   const [pricingConfig, setPricingConfig] = useState<PricingConfig>(defaultPricingConfig);
   const [pricingMessage, setPricingMessage] = useState("");
@@ -195,7 +195,7 @@ export default function HomePage() {
   );
 
   useEffect(() => {
-    if (activeTab !== "kiosk") {
+    if (activeTab !== "kiosk" && activeTab !== "mobile") {
       return undefined;
     }
     if (!scannerContainerRef.current) {
@@ -488,6 +488,7 @@ export default function HomePage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || res.statusText);
       setOperatorMessage(`${getDisplayName(scanResult)} をチェックインしました`);
+      resetScanState();
     } catch (error: any) {
       setOperatorMessage(`チェックインに失敗しました: ${error?.message || "unknown"}`);
     }
@@ -597,6 +598,15 @@ export default function HomePage() {
   const disableSubmit = !tournamentId || !scanResult || scanResult.checkedIn ||
     (adjustmentOption.requiresReason && (!customReason.trim() || customAmount === 0));
 
+  function resetScanState() {
+    setScanResult(null);
+    setScanRaw("");
+    setStudentDiscount(false);
+    setSelectedAdjustment(adjustmentOptions()[0]?.key || "none");
+    setCustomReason("");
+    setCustomAmount(0);
+  }
+
   return (
     <div className="container">
       <header>
@@ -609,6 +619,7 @@ export default function HomePage() {
         </div>
         <div className="tablist" role="tablist">
           {[
+            { key: "mobile", label: "スマホ簡易UI" },
             { key: "kiosk", label: "受付・QRスキャン" },
             { key: "operator", label: "運営ログイン・CSVアップロード" },
             { key: "dashboard", label: "ダッシュボード" },
@@ -625,49 +636,183 @@ export default function HomePage() {
         </div>
       </header>
 
-      <div className="card">
-        <div className="section-title">start.gg 大会の選択</div>
-        <p className="muted">
-          start.ggのアカウントでログイン後、マネージャー以上の権限を持つ大会を取得してチェックイン/CSVアップロード/ダッシュボードで使用する大会 ID を選択できます。
-        </p>
-        <div className="stack" style={{ gap: 8 }}>
-          <div className="flex" style={{ gap: 8, flexWrap: "wrap" }}>
-            <button className="button" type="button" onClick={fetchManagedTournaments} disabled={!authSession.authenticated || tournamentLoading}>
-              {tournamentLoading ? "取得中..." : "start.gg から大会を取得"}
+      {activeTab === "mobile" && (
+        <div className="card mobile-card">
+          <div className="section-title">スマートフォン向け 簡易チェックイン</div>
+          <div className="mobile-stack">
+            <div className="mobile-row">
+              <a className="button full-width" href="/api/auth/login">start.gg でログイン</a>
+              <button className="button secondary" type="button" onClick={refreshSession}>
+                状態更新
+              </button>
+            </div>
+            <div className="mobile-row">
+              <div className={clsx("status", authSession.authenticated ? "success" : "danger")}>
+                {authSession.authenticated ? "ログイン済" : "未ログイン"}
+              </div>
+              {authError && <div className="toast danger" style={{ width: "100%" }}>{authError}</div>}
+            </div>
+
+            <label className="label" htmlFor="mobile-tournament-select">大会を選択</label>
+            <select
+              id="mobile-tournament-select"
+              className="select"
+              value={tournamentId}
+              onChange={(e) => handleTournamentSelect(e.target.value)}
+            >
+              <option value="">start.gg から取得した大会を選択</option>
+              {managedTournaments.map((tournament) => (
+                <option key={tournament.id} value={tournament.id}>
+                  {describeTournament(tournament)}
+                </option>
+              ))}
+              {tournamentId && !managedTournaments.some((t) => t.id === tournamentId) && (
+                <option value={tournamentId}>カスタム選択: {tournamentId}</option>
+              )}
+            </select>
+            <button
+              className="button secondary"
+              type="button"
+              onClick={fetchManagedTournaments}
+              disabled={!authSession.authenticated || tournamentLoading}
+            >
+              {tournamentLoading ? "大会取得中..." : "start.gg から大会を取得"}
             </button>
-            <span className="muted">ログイン済みの場合のみ取得できます</span>
+            {tournamentMessage && <div className="toast">{tournamentMessage}</div>}
+            {tournamentError && <div className="toast danger">{tournamentError}</div>}
+
+            <div className="mobile-panel">
+              <div className="section-title" style={{ marginBottom: 8 }}>QRスキャン</div>
+              <div ref={scannerContainerRef} className="mobile-scanner" />
+              <div className="mobile-row" style={{ marginTop: 8 }}>
+                <input
+                  className="input"
+                  placeholder="QRコードURL または 参加者ID"
+                  value={scanRaw}
+                  onChange={(e) => setScanRaw(e.target.value)}
+                />
+                <button className="button secondary" onClick={handleManualLookup}>照合</button>
+              </div>
+              {scannerError && <div className="toast danger">{scannerError}</div>}
+            </div>
+
+            <div className="mobile-panel">
+              <div className="section-title" style={{ marginBottom: 6 }}>参加者情報</div>
+              {scanResult ? (
+                <div className="mobile-stack" style={{ marginBottom: 12 }}>
+                  <div className="flex-between">
+                    <div style={{ fontSize: 18, fontWeight: 800 }}>{getDisplayName(scanResult)}</div>
+                    {paymentStatus && (
+                      <span className={clsx("status", paymentStatus.status === "prepaid" ? "success" : "danger")}>
+                        {paymentStatus.label}
+                      </span>
+                    )}
+                  </div>
+                  <div className="tag-grid">
+                    <span className="badge">ID: {scanResult.participantId}</span>
+                    <span className="badge">枠: {scanResult.adminNotes || "未割当"}</span>
+                  </div>
+                  <div className="mobile-row">
+                    <label className="label" htmlFor="mobile-student">学割</label>
+                    <div className="flex" style={{ alignItems: "center", gap: 8 }}>
+                      <input
+                        id="mobile-student"
+                        type="checkbox"
+                        checked={studentDiscount}
+                        onChange={(e) => setStudentDiscount(e.target.checked)}
+                      />
+                      <span className="muted">学割を適用する</span>
+                    </div>
+                  </div>
+                  <label className="label" htmlFor="mobile-adjustment">枠・金額変更</label>
+                  <select
+                    id="mobile-adjustment"
+                    className="select"
+                    value={selectedAdjustment}
+                    onChange={(e) => setSelectedAdjustment(e.target.value)}
+                  >
+                    {adjustmentOptions().map((opt) => (
+                      <option key={opt.key} value={opt.key}>{opt.label}</option>
+                    ))}
+                  </select>
+                  {adjustmentOption.requiresReason && (
+                    <div className="mobile-stack">
+                      <label className="label" htmlFor="mobile-reason">理由</label>
+                      <input
+                        id="mobile-reason"
+                        className="input"
+                        value={customReason}
+                        onChange={(e) => setCustomReason(e.target.value)}
+                        placeholder="変更理由を入力"
+                      />
+                      <label className="label" htmlFor="mobile-amount">増減金額</label>
+                      <input
+                        id="mobile-amount"
+                        className="input"
+                        type="number"
+                        value={customAmount}
+                        onChange={(e) => setCustomAmount(Number(e.target.value))}
+                      />
+                    </div>
+                  )}
+                  <button className="button" disabled={disableSubmit} onClick={handleCheckIn}>
+                    チェックイン確定
+                  </button>
+                  {scanResult.checkedIn && <div className="muted">既にチェックイン済みです</div>}
+                </div>
+              ) : (
+                <div className="muted">QRを読み取ると参加者情報が表示されます</div>
+              )}
+            </div>
           </div>
-          <label className="label" htmlFor="tournament-select">マネージャー以上の権限のある大会を選択</label>
-          <select
-            id="tournament-select"
-            className="select"
-            value={tournamentId}
-            onChange={(e) => handleTournamentSelect(e.target.value)}
-            disabled={tournamentLoading || managedTournaments.length === 0}
-          >
-            <option value="">start.gg から取得した大会を選択</option>
-            {managedTournaments.map((tournament) => (
-              <option key={tournament.id} value={tournament.id}>
-                {describeTournament(tournament)} [{tournament.id}]
-              </option>
-            ))}
-            {tournamentId && !managedTournaments.some((t) => t.id === tournamentId) && (
-              <option value={tournamentId}>カスタム選択: {tournamentId}</option>
-            )}
-          </select>
-          <label className="label" htmlFor="tournament-id">手動で大会IDを指定（start.ggから取得不可時のフォールバック）</label>
-          <input
-            id="tournament-id"
-            className="input"
-            value={tournamentId}
-            onChange={(e) => handleTournamentSelect(e.target.value)}
-            placeholder="tournament-identifier"
-          />
-          <div className="muted">選択した大会IDがチェックイン処理・ダッシュボード表示・CSVアップロードの対象になります。</div>
-          {tournamentMessage && <div className="toast success">{tournamentMessage}</div>}
-          {tournamentError && <div className="toast danger">{tournamentError}</div>}
         </div>
-      </div>
+      )}
+
+      {activeTab !== "mobile" && (
+        <div className="card">
+          <div className="section-title">start.gg 大会の選択</div>
+          <p className="muted">
+            start.ggのアカウントでログイン後、マネージャー以上の権限を持つ大会を取得してチェックイン/CSVアップロード/ダッシュボードで使用する大会 ID を選択できます。
+          </p>
+          <div className="stack" style={{ gap: 8 }}>
+            <div className="flex" style={{ gap: 8, flexWrap: "wrap" }}>
+              <button className="button" type="button" onClick={fetchManagedTournaments} disabled={!authSession.authenticated || tournamentLoading}>
+                {tournamentLoading ? "取得中..." : "start.gg から大会を取得"}
+              </button>
+              <span className="muted">ログイン済みの場合のみ取得できます</span>
+            </div>
+            <label className="label" htmlFor="tournament-select">マネージャー以上の権限のある大会を選択</label>
+            <select
+              id="tournament-select"
+              className="select"
+              value={tournamentId}
+              onChange={(e) => handleTournamentSelect(e.target.value)}
+              disabled={tournamentLoading || managedTournaments.length === 0}
+            >
+              <option value="">start.gg から取得した大会を選択</option>
+              {managedTournaments.map((tournament) => (
+                <option key={tournament.id} value={tournament.id}>
+                  {describeTournament(tournament)} [{tournament.id}]
+                </option>
+              ))}
+              {tournamentId && !managedTournaments.some((t) => t.id === tournamentId) && (
+                <option value={tournamentId}>カスタム選択: {tournamentId}</option>
+              )}
+            </select>
+            <label className="label" htmlFor="tournament-id">手動で大会IDを指定（start.ggから取得不可時のフォールバック）</label>
+            <input
+              id="tournament-id"
+              className="input"
+              value={tournamentId}
+              onChange={(e) => handleTournamentSelect(e.target.value)}
+              placeholder="tournament-identifier"
+            />
+            <div className="muted">選択した大会IDがチェックイン処理・ダッシュボード表示・CSVアップロードの対象になります。</div>
+            {tournamentMessage && <div className="toast success">{tournamentMessage}</div>}
+            {tournamentError && <div className="toast danger">{tournamentError}</div>}
+          </div>
+        </div>
+      )}
 
       {activeTab === "kiosk" && (
         <div className="card-grid">
