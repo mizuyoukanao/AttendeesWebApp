@@ -138,6 +138,13 @@ header {
   box-shadow: 0 10px 30px rgba(99, 102, 241, 0.35);
 }
 
+.button.secondary {
+  background: #1f2937;
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: none;
+}
+
 .button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
@@ -196,6 +203,41 @@ header {
   color: #cbd5e1;
   font-size: 12px;
   font-weight: 700;
+}
+
+.mobile-card {
+  max-width: 640px;
+  margin: 0 auto 12px;
+}
+
+.mobile-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mobile-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mobile-panel {
+  background: #0b1021;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.mobile-scanner {
+  border-radius: 12px;
+  overflow: hidden;
+  min-height: 200px;
+}
+
+.full-width {
+  flex: 1;
+  text-align: center;
 }
 
 .table {
