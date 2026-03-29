@@ -86,6 +86,7 @@ type AuthSession = {
     id?: string;
     slug?: string;
     email?: string;
+    name?: string;
     gamerTag?: string;
   };
 };
@@ -176,8 +177,15 @@ export default function HomePage() {
   const [customReason, setCustomReason] = useState("");
   const [customAmount, setCustomAmount] = useState(0);
   const [operatorMessage, setOperatorMessage] = useState("");
+  const [kioskMessage, setKioskMessage] = useState("");
+  const [compactKiosk, setCompactKiosk] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [filter, setFilter] = useState<"all" | "checkedIn" | "notCheckedIn">("all");
+  const [editingParticipant, setEditingParticipant] = useState<Participant | null>(null);
+  const [editAdminNotes, setEditAdminNotes] = useState("");
+  const [editAdjustmentKey, setEditAdjustmentKey] = useState(defaultPricingConfig.adjustmentOptions[0].key);
+  const [editCustomReason, setEditCustomReason] = useState("");
+  const [editCustomAmount, setEditCustomAmount] = useState(0);
   const scannerContainerRef = useRef<HTMLDivElement>(null);
   const [authSession, setAuthSession] = useState<AuthSession>({ authenticated: false });
   const [authError, setAuthError] = useState("");
@@ -193,6 +201,10 @@ export default function HomePage() {
     },
     [selectedAdjustment, pricingConfig],
   );
+  const editAdjustmentOption = useMemo(() => {
+    const options = adjustmentOptions();
+    return options.find((opt) => opt.key === editAdjustmentKey) ?? options[0];
+  }, [editAdjustmentKey, pricingConfig]);
 
   useEffect(() => {
     if (activeTab !== "kiosk") {
@@ -235,6 +247,14 @@ export default function HomePage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authSession.authenticated]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-height: 520px) and (min-aspect-ratio: 21/9)");
+    const sync = () => setCompactKiosk(media.matches);
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
 
   useEffect(() => {
     if (!tournamentId) return;
@@ -306,6 +326,15 @@ export default function HomePage() {
       setSelectedAdjustment(pricingConfig.adjustmentOptions[0].key);
     }
   }, [pricingConfig, selectedAdjustment]);
+
+  useEffect(() => {
+    if (!scanResult) return;
+    setEditingParticipant(scanResult);
+    setEditAdminNotes(scanResult.adminNotes || "");
+    setEditAdjustmentKey(pricingConfig.adjustmentOptions[0]?.key || "none");
+    setEditCustomReason("");
+    setEditCustomAmount(0);
+  }, [scanResult, pricingConfig.adjustmentOptions]);
 
   function adjustmentOptions(): AdjustmentOption[] {
     return pricingConfig.adjustmentOptions;
@@ -438,6 +467,8 @@ export default function HomePage() {
   }
 
   function handleTournamentSelect(value: string) {
+    clearCurrentParticipant();
+    setKioskMessage("");
     setTournamentId(value);
     const matched = managedTournaments.find((t) => t.id === value);
     if (matched?.name) {
@@ -461,9 +492,27 @@ export default function HomePage() {
     handleLookup(scanRaw.trim());
   }
 
+  function clearCurrentParticipant() {
+    setScanResult(null);
+    setScanRaw("");
+    setStudentDiscount(false);
+    setSelectedAdjustment(pricingConfig.adjustmentOptions[0]?.key || "none");
+    setCustomReason("");
+    setCustomAmount(0);
+    setEditingParticipant(null);
+    setEditAdminNotes("");
+    setEditAdjustmentKey(pricingConfig.adjustmentOptions[0]?.key || "none");
+    setEditCustomReason("");
+    setEditCustomAmount(0);
+  }
+
   async function handleCheckIn() {
     if (!scanResult) return;
     if (scanResult.checkedIn) return;
+    if (!authSession.authenticated) {
+      setKioskMessage("チェックインにはstart.ggログインが必要です");
+      return;
+    }
     if (!tournamentId) {
       setScannerError("大会を選択してください");
       return;
@@ -473,6 +522,11 @@ export default function HomePage() {
     const reasonLabel = adjustmentOption.key === "other" ? `その他: ${customReason}` : adjustmentOption.label;
 
     try {
+      const participantExists = participants.some((p) => p.participantId === scanResult.participantId);
+      if (!participantExists) {
+        throw new Error("選択中の大会に対象参加者が見つかりません。大会選択を確認してください。");
+      }
+
       const res = await fetch(
         `/api/tournaments/${encodeURIComponent(tournamentId)}/participants/${encodeURIComponent(scanResult.participantId)}/checkin`,
         {
@@ -488,12 +542,61 @@ export default function HomePage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || res.statusText);
       setOperatorMessage(`${getDisplayName(scanResult)} をチェックインしました`);
+      setKioskMessage(`${getDisplayName(scanResult)} をチェックインしました。次の参加者を読み取ってください。`);
+      clearCurrentParticipant();
     } catch (error: any) {
       setOperatorMessage(`チェックインに失敗しました: ${error?.message || "unknown"}`);
+      setKioskMessage(`チェックインに失敗しました: ${error?.message || "unknown"}`);
+    }
+  }
+
+  async function updateParticipantStatus(target: Participant, resetCheckIn: boolean) {
+    if (!tournamentId || !authSession.authenticated) return;
+    const delta = editAdjustmentOption?.key === "other" ? editCustomAmount : (editAdjustmentOption?.deltaAmount ?? 0);
+    const reasonLabel = editAdjustmentOption?.key === "other"
+      ? `その他: ${editCustomReason || "編集"}`
+      : (editAdjustmentOption?.label || "変更なし");
+
+    try {
+      const res = await fetch(
+        `/api/tournaments/${encodeURIComponent(tournamentId)}/participants/${encodeURIComponent(target.participantId)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            adminNotes: editAdminNotes,
+            deltaAmount: delta,
+            reasonLabel,
+            resetCheckIn,
+            operatorUserId: authSession.user?.id || "operator-demo",
+          }),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || res.statusText);
+      const msg = resetCheckIn
+        ? `${getDisplayName(target)} を未チェックインに戻しました`
+        : `${getDisplayName(target)} の枠・金額情報を更新しました`;
+      setOperatorMessage(msg);
+      setKioskMessage(msg);
+      setEditingParticipant(null);
+      setEditCustomReason("");
+      setEditCustomAmount(0);
+      if (scanResult?.participantId === target.participantId && resetCheckIn) {
+        clearCurrentParticipant();
+      }
+    } catch (error: any) {
+      const msg = `更新に失敗しました: ${error?.message || "unknown"}`;
+      setOperatorMessage(msg);
+      setKioskMessage(msg);
     }
   }
 
   function handleCsvUpload(file: File) {
+    if (!authSession.authenticated) {
+      setOperatorMessage("CSVアップロードにはstart.ggログインが必要です");
+      return;
+    }
     if (!tournamentId) {
       setOperatorMessage("大会を選択してください");
       return;
@@ -595,7 +698,72 @@ export default function HomePage() {
     : null;
 
   const disableSubmit = !tournamentId || !scanResult || scanResult.checkedIn ||
+    !authSession.authenticated ||
     (adjustmentOption.requiresReason && (!customReason.trim() || customAmount === 0));
+  const disableEditSave = !editingParticipant ||
+    (editAdjustmentOption?.requiresReason && (!editCustomReason.trim() || editCustomAmount === 0));
+
+  const participantEditor = editingParticipant ? (
+    <div className="stack overlay-panel">
+      <div className="flex-between">
+        <div style={{ fontWeight: 700 }}>編集: {getDisplayName(editingParticipant)}</div>
+        <button className="button secondary" type="button" onClick={() => setEditingParticipant(null)}>閉じる</button>
+      </div>
+      <label className="label" htmlFor="edit-admin-notes">枠（Admin Notes）</label>
+      <input
+        id="edit-admin-notes"
+        className="input"
+        value={editAdminNotes}
+        onChange={(e) => setEditAdminNotes(e.target.value)}
+        placeholder="例: A-07"
+      />
+      <label className="label" htmlFor="edit-adjustment">金額変更</label>
+      <select
+        id="edit-adjustment"
+        className="select"
+        value={editAdjustmentKey}
+        onChange={(e) => setEditAdjustmentKey(e.target.value)}
+      >
+        {adjustmentOptions().map((opt) => (
+          <option key={opt.key} value={opt.key}>{opt.label}</option>
+        ))}
+      </select>
+      {editAdjustmentOption?.requiresReason && (
+        <div className="stack">
+          <input
+            className="input"
+            value={editCustomReason}
+            onChange={(e) => setEditCustomReason(e.target.value)}
+            placeholder="変更理由"
+          />
+          <input
+            className="input"
+            type="number"
+            value={editCustomAmount}
+            onChange={(e) => setEditCustomAmount(Number(e.target.value))}
+            placeholder="増減金額"
+          />
+        </div>
+      )}
+      <div className="flex" style={{ flexWrap: "wrap" }}>
+        <button
+          className="button"
+          type="button"
+          disabled={disableEditSave}
+          onClick={() => editingParticipant && updateParticipantStatus(editingParticipant, false)}
+        >
+          枠・金額変更を保存
+        </button>
+        <button
+          className="button secondary"
+          type="button"
+          onClick={() => editingParticipant && updateParticipantStatus(editingParticipant, true)}
+        >
+          未チェックインに戻す
+        </button>
+      </div>
+    </div>
+  ) : null;
 
   return (
     <div className="container">
@@ -651,18 +819,7 @@ export default function HomePage() {
                 {describeTournament(tournament)} [{tournament.id}]
               </option>
             ))}
-            {tournamentId && !managedTournaments.some((t) => t.id === tournamentId) && (
-              <option value={tournamentId}>カスタム選択: {tournamentId}</option>
-            )}
           </select>
-          <label className="label" htmlFor="tournament-id">手動で大会IDを指定（start.ggから取得不可時のフォールバック）</label>
-          <input
-            id="tournament-id"
-            className="input"
-            value={tournamentId}
-            onChange={(e) => handleTournamentSelect(e.target.value)}
-            placeholder="tournament-identifier"
-          />
           <div className="muted">選択した大会IDがチェックイン処理・ダッシュボード表示・CSVアップロードの対象になります。</div>
           {tournamentMessage && <div className="toast success">{tournamentMessage}</div>}
           {tournamentError && <div className="toast danger">{tournamentError}</div>}
@@ -670,10 +827,35 @@ export default function HomePage() {
       </div>
 
       {activeTab === "kiosk" && (
-        <div className="card-grid">
+        <div className={clsx("card-grid", { "kiosk-compact": compactKiosk })}>
           <div className="card">
-            <div className="section-title">QRスキャン</div>
-            <div ref={scannerContainerRef} style={{ borderRadius: 12, overflow: "hidden" }} />
+            <div className="flex-between" style={{ marginBottom: 8 }}>
+              <div className="section-title" style={{ marginBottom: 0 }}>QRスキャン</div>
+              <label className="muted" style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <input type="checkbox" checked={compactKiosk} onChange={(e) => setCompactKiosk(e.target.checked)} />
+                簡易UI
+              </label>
+            </div>
+            <a className="button secondary" href="/api/auth/login" style={{ width: "100%", textAlign: "center" }}>start.gg ログイン</a>
+            <label className="label" htmlFor="kiosk-tournament-select" style={{ marginTop: 8 }}>対象大会</label>
+            <select
+              id="kiosk-tournament-select"
+              className="select"
+              value={tournamentId}
+              onChange={(e) => handleTournamentSelect(e.target.value)}
+            >
+              <option value="">大会を選択</option>
+              {managedTournaments.map((tournament) => (
+                <option key={tournament.id} value={tournament.id}>
+                  {describeTournament(tournament)}
+                </option>
+              ))}
+            </select>
+            {authSession.authenticated ? (
+              <div ref={scannerContainerRef} style={{ borderRadius: 12, overflow: "hidden" }} />
+            ) : (
+              <div className="toast">チェックイン処理にはstart.ggログインが必要です。</div>
+            )}
             <div className="divider" />
             <label className="label" htmlFor="manual-qr">手動入力（QR文字列）</label>
             <input
@@ -682,14 +864,16 @@ export default function HomePage() {
               value={scanRaw}
               onChange={(e) => setScanRaw(e.target.value)}
               placeholder="http://www.start.gg/api/-/gg_api./participant/01234567/qr?token=..."
+              disabled={!authSession.authenticated}
             />
             <div className="flex" style={{ marginTop: 8 }}>
-              <button className="button" onClick={handleManualLookup}>参加者を照合</button>
+              <button className="button" onClick={handleManualLookup} disabled={!authSession.authenticated}>参加者を照合</button>
               {scannerError && <span className="muted">{scannerError}</span>}
             </div>
+            {kioskMessage && <div className="toast success" style={{ marginTop: 8 }}>{kioskMessage}</div>}
           </div>
 
-          <div className="card">
+          <div className={clsx("card", { "overlay-card": compactKiosk && scanResult })}>
             <div className="section-title">参加者情報</div>
             {scanResult ? (
               <div className="stack">
@@ -764,7 +948,11 @@ export default function HomePage() {
                 <button className="button" disabled={disableSubmit} onClick={handleCheckIn}>
                   チェックイン確定
                 </button>
+                <button className="button secondary" type="button" onClick={clearCurrentParticipant}>
+                  キャンセルして次へ
+                </button>
                 {scanResult.checkedIn && <div className="muted">既にチェックインされています</div>}
+                {participantEditor}
               </div>
             ) : (
               <div className="muted">QRを読み取ると参加者情報が表示されます</div>
@@ -790,14 +978,8 @@ export default function HomePage() {
             <div className="section-title">大会ごとの料金設定（データベース保存）</div>
             <p className="muted">トーナメントごとに料金設定を保存・取得します。データベースに保存した設定がチェックイン時の金額計算に反映されます。</p>
             <div className="stack">
-              <label className="label" htmlFor="pricing-tournament-id">トーナメントID (例: 012345)</label>
-              <input
-                id="pricing-tournament-id"
-                className="input"
-                value={tournamentId}
-                onChange={(e) => handleTournamentSelect(e.target.value)}
-                placeholder="トーナメントID"
-              />
+              <label className="label">選択中のトーナメントID</label>
+              <div className="code">{tournamentId || "未選択"}</div>
               <label className="label" htmlFor="tournament-name">大会名（任意でデータベースに保存）</label>
               <input
                 id="tournament-name"
@@ -805,12 +987,13 @@ export default function HomePage() {
                 value={pricingName}
                 onChange={(e) => setPricingName(e.target.value)}
                 placeholder="大会名"
+                disabled={!authSession.authenticated}
               />
               <div className="flex" style={{ gap: 8, flexWrap: "wrap" }}>
-                <button className="button" type="button" onClick={() => loadPricingConfig(tournamentId)}>
+                <button className="button" type="button" onClick={() => loadPricingConfig(tournamentId)} disabled={!authSession.authenticated}>
                   データベースから取得
                 </button>
-                <button className="button" type="button" onClick={savePricingConfig} disabled={pricingSaving}>
+                <button className="button" type="button" onClick={savePricingConfig} disabled={pricingSaving || !authSession.authenticated}>
                   {pricingSaving ? "保存中..." : "データベースへ保存"}
                 </button>
                 <span className="muted">取得元: データベース</span>
@@ -828,6 +1011,7 @@ export default function HomePage() {
                   type="number"
                   value={pricingConfig.generalFee}
                   onChange={(e) => updatePricingField("generalFee", Number(e.target.value))}
+                  disabled={!authSession.authenticated}
                 />
               </div>
               <div className="stack">
@@ -838,6 +1022,7 @@ export default function HomePage() {
                   type="number"
                   value={pricingConfig.bringConsoleFee}
                   onChange={(e) => updatePricingField("bringConsoleFee", Number(e.target.value))}
+                  disabled={!authSession.authenticated}
                 />
               </div>
               <div className="stack">
@@ -848,6 +1033,7 @@ export default function HomePage() {
                   type="number"
                   value={pricingConfig.studentFixedFee}
                   onChange={(e) => updatePricingField("studentFixedFee", Number(e.target.value))}
+                  disabled={!authSession.authenticated}
                 />
               </div>
             </div>
@@ -864,6 +1050,7 @@ export default function HomePage() {
                         className="input"
                         value={opt.key}
                         onChange={(e) => updateAdjustment(index, "key", e.target.value)}
+                        disabled={!authSession.authenticated}
                       />
                     </div>
                     <div className="stack">
@@ -872,6 +1059,7 @@ export default function HomePage() {
                         className="input"
                         value={opt.label}
                         onChange={(e) => updateAdjustment(index, "label", e.target.value)}
+                        disabled={!authSession.authenticated}
                       />
                     </div>
                     <div className="stack">
@@ -881,6 +1069,7 @@ export default function HomePage() {
                         type="number"
                         value={opt.deltaAmount}
                         onChange={(e) => updateAdjustment(index, "deltaAmount", Number(e.target.value))}
+                        disabled={!authSession.authenticated}
                       />
                     </div>
                     <div className="stack">
@@ -890,6 +1079,7 @@ export default function HomePage() {
                           type="checkbox"
                           checked={opt.requiresReason}
                           onChange={(e) => updateAdjustment(index, "requiresReason", e.target.checked)}
+                          disabled={!authSession.authenticated}
                         />
                         <span className="muted">増減した理由などの入力を必須にする</span>
                       </div>
@@ -898,14 +1088,14 @@ export default function HomePage() {
                   <div className="flex-between" style={{ marginTop: 6 }}>
                     <span className="muted">表示例: {opt.label} / {opt.deltaAmount}円</span>
                     {pricingConfig.adjustmentOptions.length > 1 && (
-                      <button className="button secondary" type="button" onClick={() => removeAdjustment(index)}>
+                      <button className="button secondary" type="button" onClick={() => removeAdjustment(index)} disabled={!authSession.authenticated}>
                         削除
                       </button>
                     )}
                   </div>
                 </div>
               ))}
-              <button className="button" type="button" onClick={addAdjustment}>オプションを追加</button>
+              <button className="button" type="button" onClick={addAdjustment} disabled={!authSession.authenticated}>オプションを追加</button>
             </div>
           </div>
 
@@ -943,6 +1133,7 @@ export default function HomePage() {
                 if (file) handleCsvUpload(file);
               }}
               className="input"
+              disabled={!authSession.authenticated}
             />
             {operatorMessage && <div className="toast" style={{ marginTop: 8 }}>{operatorMessage}</div>}
             <div className="divider" />
@@ -954,6 +1145,9 @@ export default function HomePage() {
       {activeTab === "dashboard" && (
         <div className="card">
           <div className="section-title">チェックイン状況</div>
+          {!authSession.authenticated && <div className="toast">一覧の閲覧にはstart.ggログインが必要です。</div>}
+          {authSession.authenticated && (
+            <>
           <div className="flex" style={{ marginBottom: 12 }}>
             <input
               className="input"
@@ -977,6 +1171,7 @@ export default function HomePage() {
                 <th>支払い</th>
                 <th>チェックイン</th>
                 <th>editNotes</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -998,16 +1193,34 @@ export default function HomePage() {
                     </td>
                     <td>{p.checkedIn ? formatTimestampJst(new Date(p.checkedInAt || "")) : "未"}</td>
                     <td>{p.editNotes || ""}</td>
+                    <td>
+                      <button
+                        className="button secondary"
+                        type="button"
+                        onClick={() => {
+                          setEditingParticipant(p);
+                          setEditAdminNotes(p.adminNotes || "");
+                          setEditAdjustmentKey(pricingConfig.adjustmentOptions[0]?.key || "none");
+                          setEditCustomReason("");
+                          setEditCustomAmount(0);
+                        }}
+                      >
+                        編集
+                      </button>
+                    </td>
                   </tr>
                 );
               })}
               {filteredParticipants.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="muted">該当データがありません</td>
+                  <td colSpan={7} className="muted">該当データがありません</td>
                 </tr>
               )}
             </tbody>
           </table>
+          {participantEditor}
+            </>
+          )}
         </div>
       )}
     </div>

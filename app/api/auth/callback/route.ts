@@ -17,8 +17,8 @@ function getPublicOrigin(request: NextRequest) {
 }
 
 async function exchangeCodeForToken(code: string, redirectUri: string) {
-  const clientId = process.env.STARTGG_CLIENT_ID;
-  const clientSecret = process.env.STARTGG_CLIENT_SECRET;
+  const clientId = process.env.SGGCID;
+  const clientSecret = process.env.SGGCS;
 
   if (!clientId || !clientSecret) {
     throw new Error("クライアントID/シークレットが未設定です");
@@ -56,7 +56,7 @@ async function fetchViewer(accessToken: string) {
         Authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify({
-        query: `query Viewer { currentUser { id slug email gamerTag } }`,
+        query: `query Viewer { currentUser { id slug name player { gamerTag } } }`,
       }),
     });
 
@@ -65,6 +65,9 @@ async function fetchViewer(accessToken: string) {
     }
 
     const data = await response.json();
+    if (data?.errors?.length) {
+      return null;
+    }
     return data?.data?.currentUser ?? null;
   } catch {
     return null;
@@ -124,8 +127,8 @@ export async function GET(request: NextRequest) {
         Buffer.from(JSON.stringify({
           id: viewer.id,
           slug: viewer.slug,
-          email: viewer.email,
-          gamerTag: viewer.gamerTag,
+          name: viewer.name,
+          gamerTag: viewer?.player?.gamerTag || null,
         })).toString("base64"),
         {
           httpOnly: true,

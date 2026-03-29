@@ -10,12 +10,12 @@ start.gg 連携のチェックインページと運営ダッシュボードの N
    ```
 2. 環境変数を `.env.local` に設定
    ```env
-   STARTGG_CLIENT_ID=your_client_id
-   STARTGG_CLIENT_SECRET=your_client_secret
+   SGGCID=your_client_id
+   SGGCS=your_client_secret
    # start.gg に登録した Redirect URI（例: http://localhost:3000/api/auth/callback）
    STARTGG_REDIRECT_URI=http://localhost:3000/api/auth/callback
    # 必要に応じて scope を上書き（デフォルト: "identity tournaments:read"）
-   STARTGG_OAUTH_SCOPE=identity tournaments:read
+   SGGOASCP=identity tournaments:read
 
    # Firestore（サービスアカウント）
    FIREBASE_PROJECT_ID=your_project_id

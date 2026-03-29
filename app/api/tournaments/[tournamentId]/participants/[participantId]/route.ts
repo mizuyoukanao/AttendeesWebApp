@@ -43,7 +43,7 @@ async function resolveOperatorUserId(accessToken: string, fallback: string) {
     return fallback;
   }
 }
-export async function POST(
+export async function PATCH(
   request: NextRequest,
   { params }: { params: { tournamentId: string; participantId: string } },
 ) {
@@ -55,8 +55,10 @@ export async function POST(
     return NextResponse.json({ error: "リクエストボディが空です" }, { status: 400 });
   }
 
+  const resetCheckIn = Boolean(body.resetCheckIn);
+  const adminNotes = typeof body.adminNotes === "string" ? body.adminNotes.trim() : undefined;
   const delta = Number(body.deltaAmount ?? 0);
-  const reasonLabel = String(body.reasonLabel || "").trim();
+  const reasonLabel = String(body.reasonLabel || "編集").trim();
   const requestedUserId = String(body.operatorUserId || "operator").trim();
   const accessToken = cookies().get("startgg_access_token")?.value || "";
   const operatorUserId = await resolveOperatorUserId(accessToken, requestedUserId);
@@ -75,28 +77,28 @@ export async function POST(
     }
 
     const existing = snap.data() || {};
-    if (existing.checkedIn) {
-      return NextResponse.json({ error: "すでにチェックイン済みです" }, { status: 400 });
+    const now = new Date();
+    const timestamp = formatTimestampJst(now);
+    const logPrefix = resetCheckIn ? "未チェックインへ戻す" : "枠・金額編集";
+    const noteEntry = `${timestamp} | ${logPrefix}: ${reasonLabel} | ${delta >= 0 ? `+${delta}` : delta}円`;
+
+    const payload: Record<string, unknown> = {
+      checkedInBy: operatorUserId,
+      editNotes: existing.editNotes ? `${existing.editNotes}\n${noteEntry}` : noteEntry,
+      updatedAt: FieldValue.serverTimestamp(),
+    };
+
+    if (adminNotes !== undefined) {
+      payload.adminNotes = adminNotes;
+    }
+    if (resetCheckIn) {
+      payload.checkedIn = false;
+      payload.checkedInAt = null;
     }
 
-    const timestamp = new Date();
-    const noteEntry = delta !== 0 || reasonLabel
-      ? `${formatTimestampJst(timestamp)} | ${reasonLabel || "チェックイン"} | ${delta >= 0 ? `+${delta}` : delta}円`
-      : `${formatTimestampJst(timestamp)} | チェックイン | 0円`;
-
-    await docRef.set(
-      {
-        checkedIn: true,
-        checkedInAt: FieldValue.serverTimestamp(),
-        checkedInBy: operatorUserId,
-        editNotes: existing.editNotes ? `${existing.editNotes}\n${noteEntry}` : noteEntry,
-        updatedAt: FieldValue.serverTimestamp(),
-      },
-      { merge: true },
-    );
-
+    await docRef.set(payload, { merge: true });
     return NextResponse.json({ ok: true, noteEntry });
   } catch (error: any) {
-    return NextResponse.json({ error: error?.message ?? "チェックイン更新エラー" }, { status: 500 });
+    return NextResponse.json({ error: error?.message ?? "参加者更新エラー" }, { status: 500 });
   }
 }

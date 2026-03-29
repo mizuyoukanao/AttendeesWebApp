@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
 
@@ -35,10 +36,21 @@ function normalizeParticipant(input: any): ParticipantPayload | null {
   };
 }
 
+
+function ensureAuthenticated() {
+  const accessToken = cookies().get("startgg_access_token")?.value;
+  if (!accessToken) {
+    return NextResponse.json({ error: "start.gg に未ログインです" }, { status: 401 });
+  }
+  return null;
+}
 export async function GET(
   _req: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
+  const unauthorized = ensureAuthenticated();
+  if (unauthorized) return unauthorized;
+
   try {
     const firestore = ensureFirestore();
     const participantsSnap = await firestore
@@ -59,6 +71,9 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
+  const unauthorized = ensureAuthenticated();
+  if (unauthorized) return unauthorized;
+
   const body = await request.json().catch(() => null);
   const rows: any[] = Array.isArray(body?.participants) ? body.participants : Array.isArray(body) ? body : [];
 
