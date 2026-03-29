@@ -3,6 +3,19 @@ import { NextRequest, NextResponse } from "next/server";
 const TOKEN_URL = "https://api.start.gg/oauth/access_token";
 const GRAPHQL_URL = "https://api.start.gg/gql/alpha";
 
+function getPublicOrigin(request: NextRequest) {
+  const proto =
+    request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() ?? "https";
+
+  const host =
+    request.headers.get("x-forwarded-host")?.split(",")[0]?.trim() ??
+    request.headers.get("host")?.split(",")[0]?.trim();
+
+  if (!host) throw new Error("host を判定できませんでした");
+
+  return `${proto}://${host}`;
+}
+
 async function exchangeCodeForToken(code: string, redirectUri: string) {
   const clientId = process.env.STARTGG_CLIENT_ID;
   const clientSecret = process.env.STARTGG_CLIENT_SECRET;
@@ -53,7 +66,7 @@ async function fetchViewer(accessToken: string) {
 
     const data = await response.json();
     return data?.data?.currentUser ?? null;
-  } catch (error) {
+  } catch {
     return null;
   }
 }
@@ -84,8 +97,8 @@ export async function GET(request: NextRequest) {
     const expiresIn = tokenResponse.expires_in as number | undefined;
 
     const viewer = accessToken ? await fetchViewer(accessToken) : null;
-
-    const response = NextResponse.redirect(new URL("/", request.url));
+    const publicOrigin = getPublicOrigin(request);
+    const response = NextResponse.redirect(new URL("/", publicOrigin));
     response.cookies.set("startgg_oauth_state", "", { path: "/", maxAge: 0 });
     response.cookies.set("startgg_access_token", accessToken, {
       httpOnly: true,
