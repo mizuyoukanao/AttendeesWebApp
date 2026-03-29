@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
 
@@ -52,10 +53,21 @@ function normalizePricingConfig(input: any): PricingConfig {
   };
 }
 
+
+function ensureAuthenticated() {
+  const accessToken = cookies().get("startgg_access_token")?.value;
+  if (!accessToken) {
+    return NextResponse.json({ error: "start.gg に未ログインです" }, { status: 401 });
+  }
+  return null;
+}
 export async function GET(
   _request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
+  const unauthorized = ensureAuthenticated();
+  if (unauthorized) return unauthorized;
+
   try {
     const firestore = ensureFirestore();
     const docRef = firestore.collection("tournaments").doc(params.tournamentId);
@@ -77,6 +89,9 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
+  const unauthorized = ensureAuthenticated();
+  if (unauthorized) return unauthorized;
+
   const body = await request.json().catch(() => null);
   if (!body) {
     return NextResponse.json({ error: "リクエストボディを解析できません" }, { status: 400 });
