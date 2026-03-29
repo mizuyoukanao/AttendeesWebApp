@@ -639,24 +639,13 @@ export default function HomePage() {
       {activeTab === "mobile" && (
         <div className="card mobile-card">
           <div className="section-title">スマートフォン向け 簡易チェックイン</div>
-          <div className="mobile-stack">
-            <div className="mobile-row">
-              <a className="button full-width" href="/api/auth/login">start.gg でログイン</a>
-              <button className="button secondary" type="button" onClick={refreshSession}>
-                状態更新
-              </button>
-            </div>
-            <div className="mobile-row">
-              <div className={clsx("status", authSession.authenticated ? "success" : "danger")}>
-                {authSession.authenticated ? "ログイン済" : "未ログイン"}
-              </div>
-              {authError && <div className="toast danger" style={{ width: "100%" }}>{authError}</div>}
-            </div>
-
+          <div className="mobile-stack compact">
+            <a className="button full-width" href="/api/auth/login">start.gg でログイン</a>
             <label className="label" htmlFor="mobile-tournament-select">大会を選択</label>
             <select
               id="mobile-tournament-select"
               className="select"
+              disabled={!authSession.authenticated || tournamentLoading}
               value={tournamentId}
               onChange={(e) => handleTournamentSelect(e.target.value)}
             >
@@ -670,21 +659,16 @@ export default function HomePage() {
                 <option value={tournamentId}>カスタム選択: {tournamentId}</option>
               )}
             </select>
-            <button
-              className="button secondary"
-              type="button"
-              onClick={fetchManagedTournaments}
-              disabled={!authSession.authenticated || tournamentLoading}
-            >
-              {tournamentLoading ? "大会取得中..." : "start.gg から大会を取得"}
-            </button>
-            {tournamentMessage && <div className="toast">{tournamentMessage}</div>}
+            <div className={clsx("status", authSession.authenticated ? "success" : "danger")}>
+              {authSession.authenticated ? "ログイン済み" : "ログインしてください"}
+            </div>
+            {authError && <div className="toast danger">{authError}</div>}
             {tournamentError && <div className="toast danger">{tournamentError}</div>}
 
-            <div className="mobile-panel">
-              <div className="section-title" style={{ marginBottom: 8 }}>QRスキャン</div>
+            <div className="mobile-panel compact">
+              <div className="section-title" style={{ marginBottom: 4 }}>QRスキャン</div>
               <div ref={scannerContainerRef} className="mobile-scanner" />
-              <div className="mobile-row" style={{ marginTop: 8 }}>
+              <div className="mobile-row" style={{ marginTop: 6 }}>
                 <input
                   className="input"
                   placeholder="QRコードURL または 参加者ID"
@@ -694,75 +678,6 @@ export default function HomePage() {
                 <button className="button secondary" onClick={handleManualLookup}>照合</button>
               </div>
               {scannerError && <div className="toast danger">{scannerError}</div>}
-            </div>
-
-            <div className="mobile-panel">
-              <div className="section-title" style={{ marginBottom: 6 }}>参加者情報</div>
-              {scanResult ? (
-                <div className="mobile-stack" style={{ marginBottom: 12 }}>
-                  <div className="flex-between">
-                    <div style={{ fontSize: 18, fontWeight: 800 }}>{getDisplayName(scanResult)}</div>
-                    {paymentStatus && (
-                      <span className={clsx("status", paymentStatus.status === "prepaid" ? "success" : "danger")}>
-                        {paymentStatus.label}
-                      </span>
-                    )}
-                  </div>
-                  <div className="tag-grid">
-                    <span className="badge">ID: {scanResult.participantId}</span>
-                    <span className="badge">枠: {scanResult.adminNotes || "未割当"}</span>
-                  </div>
-                  <div className="mobile-row">
-                    <label className="label" htmlFor="mobile-student">学割</label>
-                    <div className="flex" style={{ alignItems: "center", gap: 8 }}>
-                      <input
-                        id="mobile-student"
-                        type="checkbox"
-                        checked={studentDiscount}
-                        onChange={(e) => setStudentDiscount(e.target.checked)}
-                      />
-                      <span className="muted">学割を適用する</span>
-                    </div>
-                  </div>
-                  <label className="label" htmlFor="mobile-adjustment">枠・金額変更</label>
-                  <select
-                    id="mobile-adjustment"
-                    className="select"
-                    value={selectedAdjustment}
-                    onChange={(e) => setSelectedAdjustment(e.target.value)}
-                  >
-                    {adjustmentOptions().map((opt) => (
-                      <option key={opt.key} value={opt.key}>{opt.label}</option>
-                    ))}
-                  </select>
-                  {adjustmentOption.requiresReason && (
-                    <div className="mobile-stack">
-                      <label className="label" htmlFor="mobile-reason">理由</label>
-                      <input
-                        id="mobile-reason"
-                        className="input"
-                        value={customReason}
-                        onChange={(e) => setCustomReason(e.target.value)}
-                        placeholder="変更理由を入力"
-                      />
-                      <label className="label" htmlFor="mobile-amount">増減金額</label>
-                      <input
-                        id="mobile-amount"
-                        className="input"
-                        type="number"
-                        value={customAmount}
-                        onChange={(e) => setCustomAmount(Number(e.target.value))}
-                      />
-                    </div>
-                  )}
-                  <button className="button" disabled={disableSubmit} onClick={handleCheckIn}>
-                    チェックイン確定
-                  </button>
-                  {scanResult.checkedIn && <div className="muted">既にチェックイン済みです</div>}
-                </div>
-              ) : (
-                <div className="muted">QRを読み取ると参加者情報が表示されます</div>
-              )}
             </div>
           </div>
         </div>

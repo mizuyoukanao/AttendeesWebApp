@@ -206,14 +206,19 @@ header {
 }
 
 .mobile-card {
-  max-width: 640px;
+  max-width: 520px;
   margin: 0 auto 12px;
+  min-height: calc(100vh - 160px);
 }
 
 .mobile-stack {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.mobile-stack.compact {
+  gap: 6px;
 }
 
 .mobile-row {
@@ -229,10 +234,15 @@ header {
   padding: 10px;
 }
 
+.mobile-panel.compact {
+  padding: 8px;
+}
+
 .mobile-scanner {
   border-radius: 12px;
   overflow: hidden;
-  min-height: 200px;
+  min-height: 46vh;
+  max-height: 62vh;
 }
 
 .full-width {
