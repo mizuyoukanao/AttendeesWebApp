@@ -18,10 +18,10 @@ start.gg 連携のチェックインページと運営ダッシュボードの N
    SGGOASCP=identity tournaments:read
 
    # Firestore（サービスアカウント）
-   FIREBASE_PROJECT_ID=your_project_id
-   FIREBASE_CLIENT_EMAIL=service-account@your_project_id.iam.gserviceaccount.com
+   PID_SECRET=your_project_id
+   CLIENT_EMAIL_SECRET=service-account@your_project_id.iam.gserviceaccount.com
    # JSON の private_key をそのまま貼る。改行は \n に置換
-   FIREBASE_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nXXXX\n-----END PRIVATE KEY-----\n
+   PRI_KEY=-----BEGIN PRIVATE KEY-----\nXXXX\n-----END PRIVATE KEY-----\n
    # Firestore クライアント（リアルタイム購読用 / NEXT_PUBLIC_ 前提）
    NEXT_PUBLIC_FIREBASE_API_KEY=your_web_api_key
    NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=your_project_id.firebaseapp.com
@@ -46,9 +46,9 @@ start.gg 連携のチェックインページと運営ダッシュボードの N
 ## Firestore 設定手順
 1. Firebase コンソールで Firestore を「ネイティブモード」で有効化し、プロジェクトIDを控える。
 2. IAMと管理 > サービスアカウントで新規キー（JSON）を発行し、以下の値を `.env.local` に設定する。
-   - `project_id` → `FIREBASE_PROJECT_ID`
-   - `client_email` → `FIREBASE_CLIENT_EMAIL`
-   - `private_key` → `FIREBASE_PRIVATE_KEY`（改行を `\n` に置換）
+   - `project_id` → `PID_SECRET`
+   - `client_email` → `CLIENT_EMAIL_SECRET`
+   - `private_key` → `PRI_KEY`（改行を `\n` に置換）
 3. セキュリティルールで適切な read/write 権限を設定し、Cloud Functions/Next.js のホストと同じサービスアカウントでアクセスできるようにする。
 4. 料金設定保存 API は `tournaments/{tournamentId}` ドキュメントに `pricingConfig` フィールドを `merge` で書き込みます（`updatedAt` は serverTimestamp）。
 5. 参加者データは `tournaments/{tournamentId}/participants/{participantId}` に保存します。クライアントは Web SDK（NEXT_PUBLIC_FIREBASE_* の設定）で onSnapshot によるリアルタイム購読を行い、サーバー経由の POST/チェックイン更新が他端末にも同期されます。
