@@ -186,6 +186,7 @@ export default function HomePage() {
   const [editAdjustmentKey, setEditAdjustmentKey] = useState(defaultPricingConfig.adjustmentOptions[0].key);
   const [editCustomReason, setEditCustomReason] = useState("");
   const [editCustomAmount, setEditCustomAmount] = useState(0);
+  const [editCheckedIn, setEditCheckedIn] = useState(false);
   const scannerContainerRef = useRef<HTMLDivElement>(null);
   const [authSession, setAuthSession] = useState<AuthSession>({ authenticated: false });
   const [authError, setAuthError] = useState("");
@@ -193,6 +194,7 @@ export default function HomePage() {
   const [tournamentLoading, setTournamentLoading] = useState(false);
   const [tournamentMessage, setTournamentMessage] = useState("");
   const [tournamentError, setTournamentError] = useState("");
+  const [isMobileViewport, setIsMobileViewport] = useState(false);
 
   const adjustmentOption = useMemo(
     () => {
@@ -207,7 +209,7 @@ export default function HomePage() {
   }, [editAdjustmentKey, pricingConfig]);
 
   useEffect(() => {
-    if (activeTab !== "kiosk") {
+    if (activeTab !== "kiosk" || !authSession.authenticated) {
       return undefined;
     }
     if (!scannerContainerRef.current) {
@@ -231,7 +233,7 @@ export default function HomePage() {
     return () => {
       scanner.clear().catch(() => {});
     };
-  }, [activeTab]);
+  }, [activeTab, authSession.authenticated, tournamentId]);
 
   useEffect(() => {
     refreshSession();
@@ -249,8 +251,12 @@ export default function HomePage() {
   }, [authSession.authenticated]);
 
   useEffect(() => {
-    const media = window.matchMedia("(max-height: 520px) and (min-aspect-ratio: 21/9)");
-    const sync = () => setCompactKiosk(media.matches);
+    const media = window.matchMedia("(max-width: 768px), (pointer: coarse)");
+    const sync = () => {
+      const isMobile = media.matches;
+      setIsMobileViewport(isMobile);
+      setCompactKiosk(isMobile);
+    };
     sync();
     media.addEventListener("change", sync);
     return () => media.removeEventListener("change", sync);
@@ -329,11 +335,7 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!scanResult) return;
-    setEditingParticipant(scanResult);
-    setEditAdminNotes(scanResult.adminNotes || "");
-    setEditAdjustmentKey(pricingConfig.adjustmentOptions[0]?.key || "none");
-    setEditCustomReason("");
-    setEditCustomAmount(0);
+    openParticipantEditor(scanResult);
   }, [scanResult, pricingConfig.adjustmentOptions]);
 
   function adjustmentOptions(): AdjustmentOption[] {
@@ -504,6 +506,16 @@ export default function HomePage() {
     setEditAdjustmentKey(pricingConfig.adjustmentOptions[0]?.key || "none");
     setEditCustomReason("");
     setEditCustomAmount(0);
+    setEditCheckedIn(false);
+  }
+
+  function openParticipantEditor(target: Participant) {
+    setEditingParticipant(target);
+    setEditAdminNotes(target.adminNotes || "");
+    setEditAdjustmentKey(pricingConfig.adjustmentOptions[0]?.key || "none");
+    setEditCustomReason("");
+    setEditCustomAmount(0);
+    setEditCheckedIn(target.checkedIn);
   }
 
   async function handleCheckIn() {
@@ -551,7 +563,14 @@ export default function HomePage() {
   }
 
   async function updateParticipantStatus(target: Participant, resetCheckIn: boolean) {
-    if (!tournamentId || !authSession.authenticated) return;
+    if (!tournamentId || !authSession.authenticated) {
+      const msg = !authSession.authenticated
+        ? "編集にはstart.ggログインが必要です"
+        : "対象大会を選択してください";
+      setOperatorMessage(msg);
+      setKioskMessage(msg);
+      return;
+    }
     const delta = editAdjustmentOption?.key === "other" ? editCustomAmount : (editAdjustmentOption?.deltaAmount ?? 0);
     const reasonLabel = editAdjustmentOption?.key === "other"
       ? `その他: ${editCustomReason || "編集"}`
@@ -568,6 +587,7 @@ export default function HomePage() {
             deltaAmount: delta,
             reasonLabel,
             resetCheckIn,
+            checkedIn: editCheckedIn,
             operatorUserId: authSession.user?.id || "operator-demo",
           }),
         },
@@ -576,7 +596,7 @@ export default function HomePage() {
       if (!res.ok) throw new Error(data?.error || res.statusText);
       const msg = resetCheckIn
         ? `${getDisplayName(target)} を未チェックインに戻しました`
-        : `${getDisplayName(target)} の枠・金額情報を更新しました`;
+        : `${getDisplayName(target)} の情報を更新しました`;
       setOperatorMessage(msg);
       setKioskMessage(msg);
       setEditingParticipant(null);
@@ -704,11 +724,22 @@ export default function HomePage() {
     (editAdjustmentOption?.requiresReason && (!editCustomReason.trim() || editCustomAmount === 0));
 
   const participantEditor = editingParticipant ? (
-    <div className="stack overlay-panel">
-      <div className="flex-between">
-        <div style={{ fontWeight: 700 }}>編集: {getDisplayName(editingParticipant)}</div>
-        <button className="button secondary" type="button" onClick={() => setEditingParticipant(null)}>閉じる</button>
-      </div>
+    <div className="editor-modal-backdrop" onClick={() => setEditingParticipant(null)}>
+      <div className="stack editor-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="flex-between">
+          <div style={{ fontWeight: 700 }}>編集: {getDisplayName(editingParticipant)}</div>
+          <button className="button secondary" type="button" onClick={() => setEditingParticipant(null)}>閉じる</button>
+        </div>
+        <label className="label" htmlFor="edit-checked-in">チェックイン状態</label>
+        <div className="flex">
+          <input
+            id="edit-checked-in"
+            type="checkbox"
+            checked={editCheckedIn}
+            onChange={(e) => setEditCheckedIn(e.target.checked)}
+          />
+          <span className="muted">チェックイン済みにする</span>
+        </div>
       <label className="label" htmlFor="edit-admin-notes">枠（Admin Notes）</label>
       <input
         id="edit-admin-notes"
@@ -761,6 +792,7 @@ export default function HomePage() {
         >
           未チェックインに戻す
         </button>
+      </div>
       </div>
     </div>
   ) : null;
@@ -836,6 +868,7 @@ export default function HomePage() {
                 簡易UI
               </label>
             </div>
+            {isMobileViewport && <div className="muted">スマホ表示のため簡易UIを自動適用しています。</div>}
             <a className="button secondary" href="/api/auth/login" style={{ width: "100%", textAlign: "center" }}>start.gg ログイン</a>
             <label className="label" htmlFor="kiosk-tournament-select" style={{ marginTop: 8 }}>対象大会</label>
             <select
@@ -851,11 +884,8 @@ export default function HomePage() {
                 </option>
               ))}
             </select>
-            {authSession.authenticated ? (
-              <div ref={scannerContainerRef} style={{ borderRadius: 12, overflow: "hidden" }} />
-            ) : (
-              <div className="toast">チェックイン処理にはstart.ggログインが必要です。</div>
-            )}
+            <div ref={scannerContainerRef} style={{ borderRadius: 12, overflow: "hidden" }} />
+            {!authSession.authenticated && <div className="toast">チェックイン処理にはstart.ggログインが必要です。</div>}
             <div className="divider" />
             <label className="label" htmlFor="manual-qr">手動入力（QR文字列）</label>
             <input
@@ -952,7 +982,6 @@ export default function HomePage() {
                   キャンセルして次へ
                 </button>
                 {scanResult.checkedIn && <div className="muted">既にチェックインされています</div>}
-                {participantEditor}
               </div>
             ) : (
               <div className="muted">QRを読み取ると参加者情報が表示されます</div>
@@ -1198,11 +1227,7 @@ export default function HomePage() {
                         className="button secondary"
                         type="button"
                         onClick={() => {
-                          setEditingParticipant(p);
-                          setEditAdminNotes(p.adminNotes || "");
-                          setEditAdjustmentKey(pricingConfig.adjustmentOptions[0]?.key || "none");
-                          setEditCustomReason("");
-                          setEditCustomAmount(0);
+                          openParticipantEditor(p);
                         }}
                       >
                         編集
@@ -1218,11 +1243,11 @@ export default function HomePage() {
               )}
             </tbody>
           </table>
-          {participantEditor}
             </>
           )}
         </div>
       )}
+      {participantEditor}
     </div>
   );
 }

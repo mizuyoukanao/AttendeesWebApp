@@ -5,7 +5,7 @@ const GRAPHQL_URL = "https://api.start.gg/gql/alpha";
 const PAGE_SIZE = 10;
 
 const MANAGED_TOURNAMENTS_QUERY = `
-  query ManagedTournaments($page: Int!, $perPage: Int!) {
+  query ManagedTournaments($page: Int!, $perPage: Int!, $roles: String) {
     currentUser {
       id
       tournaments(query: { page: $page, perPage: $perPage }) {
@@ -17,7 +17,7 @@ const MANAGED_TOURNAMENTS_QUERY = `
           city
           addrState
           countryCode
-          admins {
+          admins(roles: $roles) {
             id
           }
         }
@@ -35,7 +35,7 @@ async function requestManagedPage(accessToken: string, page: number) {
     },
     body: JSON.stringify({
       query: MANAGED_TOURNAMENTS_QUERY,
-      variables: { page, perPage: PAGE_SIZE },
+      variables: { page, perPage: PAGE_SIZE, roles: "Manager" },
     }),
   });
 
