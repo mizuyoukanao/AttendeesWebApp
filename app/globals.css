@@ -284,6 +284,27 @@ header {
   background: #0b1021;
 }
 
+.editor-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(2, 6, 23, 0.66);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+
+.editor-modal {
+  width: min(680px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  background: #0b1021;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
 @media (max-height: 520px) and (min-aspect-ratio: 21/9) {
   .kiosk-compact {
     grid-template-columns: 1fr;

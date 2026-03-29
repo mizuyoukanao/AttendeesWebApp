@@ -56,6 +56,7 @@ export async function PATCH(
   }
 
   const resetCheckIn = Boolean(body.resetCheckIn);
+  const checkedIn = typeof body.checkedIn === "boolean" ? body.checkedIn : undefined;
   const adminNotes = typeof body.adminNotes === "string" ? body.adminNotes.trim() : undefined;
   const delta = Number(body.deltaAmount ?? 0);
   const reasonLabel = String(body.reasonLabel || "編集").trim();
@@ -94,6 +95,9 @@ export async function PATCH(
     if (resetCheckIn) {
       payload.checkedIn = false;
       payload.checkedInAt = null;
+    } else if (checkedIn !== undefined) {
+      payload.checkedIn = checkedIn;
+      payload.checkedInAt = checkedIn ? FieldValue.serverTimestamp() : null;
     }
 
     await docRef.set(payload, { merge: true });
