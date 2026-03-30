@@ -309,16 +309,24 @@ header {
   .kiosk-compact {
     grid-template-columns: 1fr;
   }
+}
+
+@media (max-width: 768px), (pointer: coarse) {
+  .kiosk-compact {
+    grid-template-columns: 1fr;
+  }
 
   .overlay-card {
     position: fixed;
-    left: 12px;
-    right: 12px;
-    bottom: 12px;
-    z-index: 20;
-    max-height: 62vh;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: min(680px, calc(100vw - 24px));
+    z-index: 40;
+    max-height: calc(100vh - 24px);
     overflow-y: auto;
     background: rgba(17, 24, 39, 0.98);
     backdrop-filter: blur(8px);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
   }
 }
