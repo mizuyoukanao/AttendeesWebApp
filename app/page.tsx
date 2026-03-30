@@ -40,6 +40,7 @@ const initialParticipants: Participant[] = [
     participantId: "101",
     playerName: "Skyline",
     adminNotes: "A-01",
+    venueFeeName: "優先持参枠",
     payment: { totalTransaction: 4000, totalOwed: 0, totalPaid: 4000 },
     checkedIn: false,
     editNotes: "",
@@ -48,6 +49,7 @@ const initialParticipants: Participant[] = [
     participantId: "102",
     playerName: "Luna",
     adminNotes: "B-02",
+    venueFeeName: "持参枠",
     payment: { totalTransaction: 0, totalOwed: 4000, totalPaid: 0 },
     checkedIn: false,
     editNotes: "",
@@ -56,6 +58,7 @@ const initialParticipants: Participant[] = [
     participantId: "103",
     playerName: "Comet",
     adminNotes: "C-03",
+    venueFeeName: "一般枠",
     payment: { totalTransaction: 0, totalOwed: 3000, totalPaid: 0 },
     checkedIn: true,
     checkedInAt: new Date().toISOString(),
@@ -73,6 +76,7 @@ type Participant = {
   participantId: string;
   playerName: string;
   adminNotes?: string;
+  venueFeeName?: string;
   payment: Payment;
   checkedIn: boolean;
   checkedInAt?: string;
@@ -105,6 +109,33 @@ type PaymentStatus = {
   status: "prepaid" | "due" | "refund";
   amount: number;
   label: string;
+};
+
+type SeatPatternConfig = {
+  venueFeeNames: string[];
+  pattern: string;
+  exceptionParticipantIds: string[];
+  reserveLabelPrefix: string;
+};
+
+type SeatAssignmentConfig = {
+  bulk: SeatPatternConfig;
+  autoOnCheckin: SeatPatternConfig & { enabled: boolean };
+};
+
+const defaultSeatPatternConfig: SeatPatternConfig = {
+  venueFeeNames: [],
+  pattern: "{Alphabet:A:D}-{Int:1:4}",
+  exceptionParticipantIds: [],
+  reserveLabelPrefix: "予備台",
+};
+
+const defaultSeatAssignmentConfig: SeatAssignmentConfig = {
+  bulk: defaultSeatPatternConfig,
+  autoOnCheckin: {
+    ...defaultSeatPatternConfig,
+    enabled: false,
+  },
 };
 
 function parseParticipantIdFromQr(raw: string) {
@@ -158,8 +189,65 @@ function describeTournament(t: ManagedTournament) {
   return suffix ? `${name} (${suffix})` : name;
 }
 
+function expandAlphabetRange(start: string, end: string): string[] {
+  if (!start || !end) return [];
+  const startCode = start.toUpperCase().charCodeAt(0);
+  const endCode = end.toUpperCase().charCodeAt(0);
+  const step = startCode <= endCode ? 1 : -1;
+  const result: string[] = [];
+  for (let code = startCode; step > 0 ? code <= endCode : code >= endCode; code += step) {
+    result.push(String.fromCharCode(code));
+  }
+  return result;
+}
+
+function expandIntRange(start: number, end: number): string[] {
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return [];
+  const step = start <= end ? 1 : -1;
+  const result: string[] = [];
+  for (let value = start; step > 0 ? value <= end : value >= end; value += step) {
+    result.push(String(value));
+  }
+  return result;
+}
+
+function buildSeatLabels(pattern: string, totalCount: number): string[] {
+  const tokenRegex = /\{(Alphabet|Int):([^{}:]+):([^{}:]+)\}|\{Count\}/g;
+  const segments: Array<{ kind: "text"; value: string } | { kind: "values"; values: string[] }> = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = tokenRegex.exec(pattern)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({ kind: "text", value: pattern.slice(lastIndex, match.index) });
+    }
+    if (match[0] === "{Count}") {
+      segments.push({ kind: "text", value: String(totalCount) });
+    } else {
+      const type = match[1];
+      const rangeStart = match[2]?.trim() || "";
+      const rangeEnd = match[3]?.trim() || "";
+      const values = type === "Alphabet"
+        ? expandAlphabetRange(rangeStart, rangeEnd)
+        : expandIntRange(Number(rangeStart), Number(rangeEnd));
+      segments.push({ kind: "values", values });
+    }
+    lastIndex = tokenRegex.lastIndex;
+  }
+
+  if (lastIndex < pattern.length) {
+    segments.push({ kind: "text", value: pattern.slice(lastIndex) });
+  }
+
+  return segments.reduce<string[]>((acc, segment) => {
+    if (segment.kind === "text") return acc.map((prefix) => `${prefix}${segment.value}`);
+    if (!segment.values.length) return [];
+    return acc.flatMap((prefix) => segment.values.map((value) => `${prefix}${value}`));
+  }, [""]);
+}
+
 export default function HomePage() {
-  const [activeTab, setActiveTab] = useState<"kiosk" | "operator" | "dashboard">("kiosk");
+  const [activeTab, setActiveTab] = useState<"kiosk" | "operator" | "dashboard" | "lostFound">("kiosk");
   const [tournamentId, setTournamentId] = useState("demo-tournament");
   const [pricingConfig, setPricingConfig] = useState<PricingConfig>(defaultPricingConfig);
   const [pricingMessage, setPricingMessage] = useState("");
@@ -178,9 +266,16 @@ export default function HomePage() {
   const [customAmount, setCustomAmount] = useState(0);
   const [operatorMessage, setOperatorMessage] = useState("");
   const [kioskMessage, setKioskMessage] = useState("");
-  const [compactKiosk, setCompactKiosk] = useState(false);
+  const [lostFoundRaw, setLostFoundRaw] = useState("");
+  const [lostFoundResult, setLostFoundResult] = useState<Participant | null>(null);
+  const [lostFoundError, setLostFoundError] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [filter, setFilter] = useState<"all" | "checkedIn" | "notCheckedIn">("all");
+  const [venueFeeFilter, setVenueFeeFilter] = useState("all");
+  const [seatAssignmentConfig, setSeatAssignmentConfig] = useState<SeatAssignmentConfig>(defaultSeatAssignmentConfig);
+  const [assignmentMessage, setAssignmentMessage] = useState("");
+  const [assignmentSaving, setAssignmentSaving] = useState(false);
+  const [overwriteSeatAssignment, setOverwriteSeatAssignment] = useState(false);
   const [editingParticipant, setEditingParticipant] = useState<Participant | null>(null);
   const [editAdminNotes, setEditAdminNotes] = useState("");
   const [editAdjustmentKey, setEditAdjustmentKey] = useState(defaultPricingConfig.adjustmentOptions[0].key);
@@ -188,6 +283,7 @@ export default function HomePage() {
   const [editCustomAmount, setEditCustomAmount] = useState(0);
   const [editCheckedIn, setEditCheckedIn] = useState(false);
   const scannerContainerRef = useRef<HTMLDivElement>(null);
+  const lostFoundScannerContainerRef = useRef<HTMLDivElement>(null);
   const [authSession, setAuthSession] = useState<AuthSession>({ authenticated: false });
   const [authError, setAuthError] = useState("");
   const [managedTournaments, setManagedTournaments] = useState<ManagedTournament[]>([]);
@@ -195,6 +291,7 @@ export default function HomePage() {
   const [tournamentMessage, setTournamentMessage] = useState("");
   const [tournamentError, setTournamentError] = useState("");
   const [isMobileViewport, setIsMobileViewport] = useState(false);
+  const compactKiosk = isMobileViewport;
 
   const adjustmentOption = useMemo(
     () => {
@@ -236,6 +333,30 @@ export default function HomePage() {
   }, [activeTab, authSession.authenticated, tournamentId]);
 
   useEffect(() => {
+    if (activeTab !== "lostFound" || !authSession.authenticated) {
+      return undefined;
+    }
+    if (!lostFoundScannerContainerRef.current) {
+      return undefined;
+    }
+    const elementId = lostFoundScannerContainerRef.current.id || "lost-found-qr-reader";
+    lostFoundScannerContainerRef.current.id = elementId;
+
+    const scanner = new Html5QrcodeScanner(elementId, { fps: 10, qrbox: 240 }, false);
+    scanner.render(
+      (decoded) => {
+        setLostFoundRaw(decoded);
+        handleLostFoundLookup(decoded);
+      },
+      () => undefined,
+    );
+
+    return () => {
+      scanner.clear().catch(() => {});
+    };
+  }, [activeTab, authSession.authenticated, tournamentId, participants]);
+
+  useEffect(() => {
     refreshSession();
   }, []);
 
@@ -255,7 +376,6 @@ export default function HomePage() {
     const sync = () => {
       const isMobile = media.matches;
       setIsMobileViewport(isMobile);
-      setCompactKiosk(isMobile);
     };
     sync();
     media.addEventListener("change", sync);
@@ -265,6 +385,7 @@ export default function HomePage() {
   useEffect(() => {
     if (!tournamentId) return;
     loadPricingConfig(tournamentId);
+    loadSeatAssignmentConfig(tournamentId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tournamentId]);
 
@@ -296,6 +417,7 @@ export default function HomePage() {
                 participantId: doc.id,
                 playerName: d.playerName || doc.id,
                 adminNotes: d.adminNotes || "",
+                venueFeeName: d.venueFeeName || "",
                 payment: {
                   totalTransaction: d?.payment?.totalTransaction ?? 0,
                   totalOwed: d?.payment?.totalOwed ?? 0,
@@ -358,6 +480,56 @@ export default function HomePage() {
       setPricingConfig(defaultPricingConfig);
       setPricingSource("default");
       setPricingMessage(`料金設定の取得に失敗しました: ${error?.message || "unknown"}`);
+    }
+  }
+
+  async function loadSeatAssignmentConfig(targetId: string) {
+    if (!targetId) return;
+    try {
+      const res = await fetch(`/api/tournaments/${encodeURIComponent(targetId)}/seat-assignment`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || res.statusText);
+      const config = (data.seatAssignmentConfig as SeatAssignmentConfig) || defaultSeatAssignmentConfig;
+      setSeatAssignmentConfig({
+        bulk: {
+          ...defaultSeatPatternConfig,
+          ...(config.bulk || {}),
+        },
+        autoOnCheckin: {
+          ...defaultSeatPatternConfig,
+          ...(config.autoOnCheckin || {}),
+          enabled: Boolean(config?.autoOnCheckin?.enabled),
+        },
+      });
+    } catch (error: any) {
+      setAssignmentMessage(`台番号設定の取得に失敗しました: ${error?.message || "unknown"}`);
+    }
+  }
+
+  async function saveSeatAssignmentConfig() {
+    if (!authSession.authenticated) {
+      setAssignmentMessage("設定保存にはstart.ggログインが必要です");
+      return;
+    }
+    if (!tournamentId) {
+      setAssignmentMessage("対象大会を選択してください");
+      return;
+    }
+    setAssignmentSaving(true);
+    setAssignmentMessage("台番号設定を保存しています...");
+    try {
+      const res = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/seat-assignment`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seatAssignmentConfig }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || res.statusText);
+      setAssignmentMessage("台番号設定を保存しました");
+    } catch (error: any) {
+      setAssignmentMessage(`台番号設定の保存に失敗しました: ${error?.message || "unknown"}`);
+    } finally {
+      setAssignmentSaving(false);
     }
   }
 
@@ -471,6 +643,9 @@ export default function HomePage() {
   function handleTournamentSelect(value: string) {
     clearCurrentParticipant();
     setKioskMessage("");
+    setLostFoundRaw("");
+    setLostFoundResult(null);
+    setLostFoundError("");
     setTournamentId(value);
     const matched = managedTournaments.find((t) => t.id === value);
     if (matched?.name) {
@@ -492,6 +667,22 @@ export default function HomePage() {
 
   function handleManualLookup() {
     handleLookup(scanRaw.trim());
+  }
+
+  function handleLostFoundLookup(raw: string) {
+    const participantId = parseParticipantIdFromQr(raw);
+    if (!participantId) {
+      setLostFoundResult(null);
+      setLostFoundError("QRから参加者IDを取得できませんでした");
+      return;
+    }
+    const participant = participants.find((p) => p.participantId === participantId) || null;
+    setLostFoundResult(participant);
+    setLostFoundError(participant ? "" : "対象の参加者が見つかりません");
+  }
+
+  function handleLostFoundManualLookup() {
+    handleLostFoundLookup(lostFoundRaw.trim());
   }
 
   function clearCurrentParticipant() {
@@ -553,8 +744,9 @@ export default function HomePage() {
       );
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || res.statusText);
-      setOperatorMessage(`${getDisplayName(scanResult)} をチェックインしました`);
-      setKioskMessage(`${getDisplayName(scanResult)} をチェックインしました。次の参加者を読み取ってください。`);
+      const seatSuffix = data?.assignedSeat ? `（対戦台: ${data.assignedSeat}）` : "";
+      setOperatorMessage(`${getDisplayName(scanResult)} をチェックインしました${seatSuffix}`);
+      setKioskMessage(`${getDisplayName(scanResult)} をチェックインしました${seatSuffix}。次の参加者を読み取ってください。`);
       clearCurrentParticipant();
     } catch (error: any) {
       setOperatorMessage(`チェックインに失敗しました: ${error?.message || "unknown"}`);
@@ -612,6 +804,58 @@ export default function HomePage() {
     }
   }
 
+  function toggleAssignmentVenueFee(name: string, target: "bulk" | "autoOnCheckin") {
+    const current = seatAssignmentConfig[target].venueFeeNames;
+    const next = current.includes(name)
+      ? current.filter((item) => item !== name)
+      : [...current, name];
+    setSeatAssignmentConfig((prev) => ({
+      ...prev,
+      [target]: {
+        ...prev[target],
+        venueFeeNames: next,
+      },
+    }));
+  }
+
+  function parseParticipantIdsCsv(value: string) {
+    return value
+      .split(/[\n,]/)
+      .map((v) => v.trim())
+      .filter(Boolean);
+  }
+
+  async function assignSeatsByPattern() {
+    if (!authSession.authenticated) {
+      setAssignmentMessage("対戦台割り当てにはstart.ggログインが必要です");
+      return;
+    }
+    if (!tournamentId) {
+      setAssignmentMessage("対象大会を選択してください");
+      return;
+    }
+    if (!seatAssignmentConfig.bulk.venueFeeNames.length) {
+      setAssignmentMessage("割り当て対象の枠を1つ以上選択してください");
+      return;
+    }
+    setAssignmentMessage("対戦台を割り当て中...");
+    try {
+      const res = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/seat-assignment/assign`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: seatAssignmentConfig.bulk,
+          overwrite: overwriteSeatAssignment,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || res.statusText);
+      setAssignmentMessage(`対戦台を割り当てました（${data.count}名）`);
+    } catch (error: any) {
+      setAssignmentMessage(`対戦台割り当てに失敗しました: ${error?.message || "unknown"}`);
+    }
+  }
+
   function handleCsvUpload(file: File) {
     if (!authSession.authenticated) {
       setOperatorMessage("CSVアップロードにはstart.ggログインが必要です");
@@ -643,6 +887,7 @@ export default function HomePage() {
           "Id",
           "GamerTag",
           "Short GamerTag",
+          "Venue Fee Name",
           "Admin Notes",
           "Checked In",
           "Total Owed",
@@ -659,6 +904,7 @@ export default function HomePage() {
           const id = indexMap["Id"] >= 0 ? String(row[indexMap["Id"]]).trim() : "";
           const gamerTag = indexMap["GamerTag"] >= 0 ? String(row[indexMap["GamerTag"]]).trim() : "";
           const shortTag = indexMap["Short GamerTag"] >= 0 ? String(row[indexMap["Short GamerTag"]]).trim() : "";
+          const venueFeeName = indexMap["Venue Fee Name"] >= 0 ? String(row[indexMap["Venue Fee Name"]]).trim() : "";
           const adminNotes = indexMap["Admin Notes"] >= 0 ? String(row[indexMap["Admin Notes"]]).trim() : "";
           const totalOwed = Number(row[indexMap["Total Owed"]] || 0);
           const totalPaid = Number(row[indexMap["Total Paid"]] || 0);
@@ -670,6 +916,7 @@ export default function HomePage() {
             participantId: id,
             playerName: gamerTag || shortTag || id,
             adminNotes,
+            venueFeeName,
             payment: {
               totalTransaction,
               totalOwed,
@@ -701,6 +948,28 @@ export default function HomePage() {
     });
   }
 
+  const venueFeeOptions = useMemo(
+    () => Array.from(new Set(participants.map((p) => (p.venueFeeName || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, "ja")),
+    [participants],
+  );
+
+  useEffect(() => {
+    setSeatAssignmentConfig((prev) => ({
+      ...prev,
+      bulk: {
+        ...prev.bulk,
+        venueFeeNames: prev.bulk.venueFeeNames.filter((name) => venueFeeOptions.includes(name)),
+      },
+      autoOnCheckin: {
+        ...prev.autoOnCheckin,
+        venueFeeNames: prev.autoOnCheckin.venueFeeNames.filter((name) => venueFeeOptions.includes(name)),
+      },
+    }));
+    if (venueFeeFilter !== "all" && !venueFeeOptions.includes(venueFeeFilter)) {
+      setVenueFeeFilter("all");
+    }
+  }, [venueFeeOptions, venueFeeFilter]);
+
   const filteredParticipants = useMemo(() => {
     return participants.filter((p) => {
       const matchesSearch = getDisplayName(p).toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -709,9 +978,23 @@ export default function HomePage() {
         filter === "all" ||
         (filter === "checkedIn" && p.checkedIn) ||
         (filter === "notCheckedIn" && !p.checkedIn);
-      return matchesSearch && matchesFilter;
+      const matchesVenueFee = venueFeeFilter === "all" || (p.venueFeeName || "") === venueFeeFilter;
+      return matchesSearch && matchesFilter && matchesVenueFee;
     });
-  }, [participants, searchTerm, filter]);
+  }, [participants, searchTerm, filter, venueFeeFilter]);
+
+  const assignmentTargets = useMemo(() => {
+    if (!seatAssignmentConfig.bulk.venueFeeNames.length) return [];
+    return participants
+      .filter((p) => seatAssignmentConfig.bulk.venueFeeNames.includes((p.venueFeeName || "").trim()))
+      .filter((p) => overwriteSeatAssignment || !(p.adminNotes || "").trim())
+      .sort((a, b) => a.participantId.localeCompare(b.participantId, "en", { numeric: true }));
+  }, [overwriteSeatAssignment, participants, seatAssignmentConfig.bulk.venueFeeNames]);
+
+  const seatLabelPreview = useMemo(
+    () => buildSeatLabels(seatAssignmentConfig.bulk.pattern, assignmentTargets.length).slice(0, 8),
+    [seatAssignmentConfig.bulk.pattern, assignmentTargets.length],
+  );
 
   const paymentStatus = scanResult
     ? computePaymentStatus(scanResult, studentDiscount, adjustmentOption, customAmount, pricingConfig)
@@ -740,7 +1023,7 @@ export default function HomePage() {
           />
           <span className="muted">チェックイン済みにする</span>
         </div>
-      <label className="label" htmlFor="edit-admin-notes">枠（Admin Notes）</label>
+      <label className="label" htmlFor="edit-admin-notes">対戦台番号</label>
       <input
         id="edit-admin-notes"
         className="input"
@@ -801,17 +1084,18 @@ export default function HomePage() {
     <div className="container">
       <header>
         <div className="brand">
-          <div className="logo">GG</div>
-          <div>
-            <div style={{ fontWeight: 800, fontSize: 22 }}>AttendeesWebApp</div>
-            <div className="muted">QRスキャン / CSVアップロード / ダッシュボード</div>
+            <div className="logo">GG</div>
+            <div>
+              <div style={{ fontWeight: 800, fontSize: 22 }}>AttendeesWebApp</div>
+            <div className="muted">QRスキャン / CSVアップロード / ダッシュボード / 遺失物チェック</div>
+            </div>
           </div>
-        </div>
         <div className="tablist" role="tablist">
           {[
             { key: "kiosk", label: "受付・QRスキャン" },
             { key: "operator", label: "運営ログイン・CSVアップロード" },
             { key: "dashboard", label: "ダッシュボード" },
+            { key: "lostFound", label: "遺失物チェック" },
           ].map((tab) => (
             <button
               key={tab.key}
@@ -863,10 +1147,6 @@ export default function HomePage() {
           <div className="card">
             <div className="flex-between" style={{ marginBottom: 8 }}>
               <div className="section-title" style={{ marginBottom: 0 }}>QRスキャン</div>
-              <label className="muted" style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <input type="checkbox" checked={compactKiosk} onChange={(e) => setCompactKiosk(e.target.checked)} />
-                簡易UI
-              </label>
             </div>
             {isMobileViewport && <div className="muted">スマホ表示のため簡易UIを自動適用しています。</div>}
             <a className="button secondary" href="/api/auth/login" style={{ width: "100%", textAlign: "center" }}>start.gg ログイン</a>
@@ -985,6 +1265,55 @@ export default function HomePage() {
               </div>
             ) : (
               <div className="muted">QRを読み取ると参加者情報が表示されます</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeTab === "lostFound" && (
+        <div className="card-grid">
+          <div className="card">
+            <div className="section-title">遺失物QRスキャン</div>
+            <p className="muted">
+              大会を選択した状態で、遺失物に付与されたQR（参加者チェックインQRと同形式）を読み取ると、持ち主と対戦台番号を表示します。
+            </p>
+            {!tournamentId && <div className="toast danger">先に対象大会を選択してください。</div>}
+            {!authSession.authenticated && <div className="toast">読み取りにはstart.ggログインが必要です。</div>}
+            <div ref={lostFoundScannerContainerRef} style={{ borderRadius: 12, overflow: "hidden" }} />
+            <div className="divider" />
+            <label className="label" htmlFor="lost-found-manual-qr">手動入力（QR文字列）</label>
+            <input
+              id="lost-found-manual-qr"
+              className="input"
+              value={lostFoundRaw}
+              onChange={(e) => setLostFoundRaw(e.target.value)}
+              placeholder="http://www.start.gg/api/-/gg_api./participant/01234567/qr?token=..."
+              disabled={!authSession.authenticated}
+            />
+            <div className="flex" style={{ marginTop: 8 }}>
+              <button className="button" type="button" onClick={handleLostFoundManualLookup} disabled={!authSession.authenticated}>
+                持ち主を照合
+              </button>
+              {lostFoundError && <span className="muted">{lostFoundError}</span>}
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="section-title">照合結果</div>
+            {lostFoundResult ? (
+              <div className="stack">
+                <div style={{ fontSize: 20, fontWeight: 800 }}>{getDisplayName(lostFoundResult)}</div>
+                <div className="tag-grid">
+                  <span className="badge">ID: {lostFoundResult.participantId}</span>
+                  <span className="badge">枠: {lostFoundResult.venueFeeName || "未設定"}</span>
+                  <span className="badge">対戦台: {lostFoundResult.adminNotes || "未割当"}</span>
+                </div>
+                <div className="muted">
+                  遺失物の想定設置場所: {lostFoundResult.adminNotes || "対戦台番号の登録がないため不明"}
+                </div>
+              </div>
+            ) : (
+              <div className="muted">QRを読み取ると、持ち主と対戦台番号が表示されます。</div>
             )}
           </div>
         </div>
@@ -1153,7 +1482,7 @@ export default function HomePage() {
 
           <div className="card">
             <div className="section-title">参加者CSVアップロード</div>
-            <p className="muted">参加者情報をCSVから取得し、データベースへアップロードします。台番号を指定したい場合は、CSV内の「Admin Notes」列に記入してください。</p>
+            <p className="muted">参加者情報をCSVから取得し、データベースへアップロードします。台番号を指定したい場合は「Admin Notes」、枠の分類は「Venue Fee Name」列を利用してください。</p>
             <input
               type="file"
               accept=".csv,text/csv"
@@ -1177,6 +1506,126 @@ export default function HomePage() {
           {!authSession.authenticated && <div className="toast">一覧の閲覧にはstart.ggログインが必要です。</div>}
           {authSession.authenticated && (
             <>
+          <div className="stack" style={{ marginBottom: 12 }}>
+            <div className="section-title" style={{ marginBottom: 0 }}>対戦台の一括割り当て</div>
+            <div className="muted">
+              枠（Venue Fee Name）を選んで、フォーマットで台番号を自動生成して割り当てます。例: <code>{"{Alphabet:A:D}-{Int:1:4}"}</code> / 総人数は <code>{"{Count}"}</code> で参照できます。
+            </div>
+            <div className="flex" style={{ flexWrap: "wrap", gap: 8 }}>
+              {venueFeeOptions.map((name) => (
+                <label key={name} className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={seatAssignmentConfig.bulk.venueFeeNames.includes(name)}
+                    onChange={() => toggleAssignmentVenueFee(name, "bulk")}
+                  />
+                  {name}
+                </label>
+              ))}
+              {venueFeeOptions.length === 0 && <span className="muted">Venue Fee Name が未登録です</span>}
+            </div>
+            <div className="flex" style={{ gap: 8, flexWrap: "wrap" }}>
+              <input
+                className="input"
+                value={seatAssignmentConfig.bulk.pattern}
+                onChange={(e) => setSeatAssignmentConfig((prev) => ({ ...prev, bulk: { ...prev.bulk, pattern: e.target.value } }))}
+                placeholder="{Alphabet:A:D}-{Int:1:4}"
+              />
+              <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={overwriteSeatAssignment}
+                  onChange={(e) => setOverwriteSeatAssignment(e.target.checked)}
+                />
+                既存の台番号を上書き
+              </label>
+              <button className="button" type="button" onClick={assignSeatsByPattern}>一括割り当て実行</button>
+            </div>
+            <label className="label">強制的に予備台へ割り当てる参加者ID（カンマ or 改行区切り）</label>
+            <textarea
+              className="input"
+              value={seatAssignmentConfig.bulk.exceptionParticipantIds.join(", ")}
+              onChange={(e) => setSeatAssignmentConfig((prev) => ({
+                ...prev,
+                bulk: { ...prev.bulk, exceptionParticipantIds: parseParticipantIdsCsv(e.target.value) },
+              }))}
+              placeholder="12345, 67890"
+              rows={2}
+            />
+            <label className="label">予備台プレフィックス</label>
+            <input
+              className="input"
+              value={seatAssignmentConfig.bulk.reserveLabelPrefix}
+              onChange={(e) => setSeatAssignmentConfig((prev) => ({ ...prev, bulk: { ...prev.bulk, reserveLabelPrefix: e.target.value } }))}
+              placeholder="予備台"
+            />
+            <div className="muted">
+              対象人数: {assignmentTargets.length}名 / 生成プレビュー: {seatLabelPreview.length ? seatLabelPreview.join(", ") : "（未生成）"}
+            </div>
+            <div className="divider" />
+            <div className="section-title" style={{ marginBottom: 0 }}>チェックイン時の自動対戦台割り当て</div>
+            <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <input
+                type="checkbox"
+                checked={seatAssignmentConfig.autoOnCheckin.enabled}
+                onChange={(e) => setSeatAssignmentConfig((prev) => ({
+                  ...prev,
+                  autoOnCheckin: { ...prev.autoOnCheckin, enabled: e.target.checked },
+                }))}
+              />
+              チェックイン時に自動で対戦台を割り当てる
+            </label>
+            <div className="flex" style={{ flexWrap: "wrap", gap: 8 }}>
+              {venueFeeOptions.map((name) => (
+                <label key={`auto-${name}`} className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={seatAssignmentConfig.autoOnCheckin.venueFeeNames.includes(name)}
+                    onChange={() => toggleAssignmentVenueFee(name, "autoOnCheckin")}
+                  />
+                  {name}
+                </label>
+              ))}
+            </div>
+            <input
+              className="input"
+              value={seatAssignmentConfig.autoOnCheckin.pattern}
+              onChange={(e) => setSeatAssignmentConfig((prev) => ({
+                ...prev,
+                autoOnCheckin: { ...prev.autoOnCheckin, pattern: e.target.value },
+              }))}
+              placeholder="{Alphabet:A:D}-{Int:1:4}"
+            />
+            <textarea
+              className="input"
+              value={seatAssignmentConfig.autoOnCheckin.exceptionParticipantIds.join(", ")}
+              onChange={(e) => setSeatAssignmentConfig((prev) => ({
+                ...prev,
+                autoOnCheckin: { ...prev.autoOnCheckin, exceptionParticipantIds: parseParticipantIdsCsv(e.target.value) },
+              }))}
+              placeholder="自動割り当てで予備台にする参加者ID（カンマ or 改行区切り）"
+              rows={2}
+            />
+            <input
+              className="input"
+              value={seatAssignmentConfig.autoOnCheckin.reserveLabelPrefix}
+              onChange={(e) => setSeatAssignmentConfig((prev) => ({
+                ...prev,
+                autoOnCheckin: { ...prev.autoOnCheckin, reserveLabelPrefix: e.target.value },
+              }))}
+              placeholder="予備台"
+            />
+            <div className="flex" style={{ gap: 8, flexWrap: "wrap" }}>
+              <button className="button secondary" type="button" onClick={saveSeatAssignmentConfig} disabled={assignmentSaving}>
+                {assignmentSaving ? "保存中..." : "台番号設定を保存"}
+              </button>
+              <button className="button secondary" type="button" onClick={() => loadSeatAssignmentConfig(tournamentId)} disabled={!tournamentId}>
+                設定を再読み込み
+              </button>
+            </div>
+            {assignmentMessage && <div className="toast">{assignmentMessage}</div>}
+          </div>
+
           <div className="flex" style={{ marginBottom: 12 }}>
             <input
               className="input"
@@ -1189,6 +1638,12 @@ export default function HomePage() {
               <option value="checkedIn">チェックイン済み</option>
               <option value="notCheckedIn">未チェックイン</option>
             </select>
+            <select className="select" value={venueFeeFilter} onChange={(e) => setVenueFeeFilter(e.target.value)}>
+              <option value="all">枠: すべて</option>
+              {venueFeeOptions.map((name) => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
           </div>
 
           <table className="table">
@@ -1196,6 +1651,7 @@ export default function HomePage() {
               <tr>
                 <th>ID</th>
                 <th>プレイヤー名</th>
+                <th>枠</th>
                 <th>台番号</th>
                 <th>支払い</th>
                 <th>チェックイン</th>
@@ -1216,6 +1672,7 @@ export default function HomePage() {
                   <tr key={p.participantId}>
                     <td>{p.participantId}</td>
                     <td>{getDisplayName(p)}</td>
+                    <td>{p.venueFeeName || "-"}</td>
                     <td>{p.adminNotes || "-"}</td>
                     <td>
                       <span className={clsx("status", status.status === "prepaid" ? "success" : "danger")}>{status.label}</span>
@@ -1238,7 +1695,7 @@ export default function HomePage() {
               })}
               {filteredParticipants.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="muted">該当データがありません</td>
+                  <td colSpan={8} className="muted">該当データがありません</td>
                 </tr>
               )}
             </tbody>

@@ -7,6 +7,7 @@ type ParticipantPayload = {
   participantId: string;
   playerName?: string;
   adminNotes?: string;
+  venueFeeName?: string;
   checkedIn?: boolean;
   payment?: {
     totalTransaction?: number;
@@ -26,6 +27,7 @@ function normalizeParticipant(input: any): ParticipantPayload | null {
     participantId,
     playerName: String(input?.playerName || input?.GamerTag || input?.["GamerTag"] || input?.["Short GamerTag"] || "").trim() || participantId,
     adminNotes: String(input?.adminNotes || input?.["Admin Notes"] || "").trim() || undefined,
+    venueFeeName: String(input?.venueFeeName || input?.["Venue Fee Name"] || "").trim() || undefined,
     checkedIn: Boolean(input?.checkedIn ?? input?.["Checked In"] ?? false),
     payment: {
       totalTransaction: Number(payment.totalTransaction ?? payment["Total Transaction"] ?? 0),
@@ -105,6 +107,7 @@ export async function POST(
           participantId: participant.participantId,
           playerName: participant.playerName,
           adminNotes: participant.adminNotes ?? null,
+          venueFeeName: participant.venueFeeName ?? existing?.venueFeeName ?? null,
           payment: {
             totalTransaction: participant.payment?.totalTransaction ?? 0,
             totalOwed: participant.payment?.totalOwed ?? 0,
