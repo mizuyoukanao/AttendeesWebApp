@@ -6,7 +6,7 @@ import { ensureFirestore } from "@/lib/firebaseAdmin";
 type SeatPatternConfig = {
   venueFeeNames: string[];
   pattern: string;
-  exceptionParticipantIds: string[];
+  exceptionPlayerNames: string[];
   reserveLabelPrefix: string;
 };
 
@@ -78,9 +78,11 @@ function normalizePatternConfig(input: any): SeatPatternConfig {
       ? input.venueFeeNames.map((v: any) => String(v || "").trim()).filter(Boolean)
       : [],
     pattern: String(input?.pattern || "{Alphabet:A:D}-{Int:1:4}").trim() || "{Alphabet:A:D}-{Int:1:4}",
-    exceptionParticipantIds: Array.isArray(input?.exceptionParticipantIds)
-      ? input.exceptionParticipantIds.map((v: any) => String(v || "").trim()).filter(Boolean)
-      : [],
+    exceptionPlayerNames: Array.isArray(input?.exceptionPlayerNames)
+      ? input.exceptionPlayerNames.map((v: any) => String(v || "").trim()).filter(Boolean)
+      : Array.isArray(input?.exceptionParticipantIds)
+        ? input.exceptionParticipantIds.map((v: any) => String(v || "").trim()).filter(Boolean)
+        : [],
     reserveLabelPrefix: String(input?.reserveLabelPrefix || "予備台").trim() || "予備台",
   };
 }
@@ -134,7 +136,7 @@ export async function POST(
     }
 
     let normalIndex = 0;
-    const exceptionIds = new Set(config.exceptionParticipantIds);
+    const exceptionNames = new Set(config.exceptionPlayerNames);
     const assignments: Array<{ participantId: string; label: string }> = [];
 
     for (const target of targets) {
@@ -143,7 +145,7 @@ export async function POST(
         continue;
       }
 
-      if (exceptionIds.has(target.id)) {
+      if (exceptionNames.has(String(target.data.playerName || "").trim())) {
         label = nextReserveLabel(config.reserveLabelPrefix, usedLabels);
       } else {
         while (normalIndex < normalLabels.length && usedLabels.has(normalLabels[normalIndex])) {

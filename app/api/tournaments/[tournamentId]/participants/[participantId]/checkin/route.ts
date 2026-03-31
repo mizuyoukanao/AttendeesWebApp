@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
+import { ensureOperatorAccess } from "@/lib/operatorAccess";
 
 function formatTimestampJst(date: Date) {
   const offsetMs = 9 * 60 * 60 * 1000;
@@ -15,14 +15,6 @@ function formatTimestampJst(date: Date) {
 }
 
 const GRAPHQL_URL = "https://api.start.gg/gql/alpha";
-
-function ensureAuthenticated() {
-  const accessToken = cookies().get("startgg_access_token")?.value;
-  if (!accessToken) {
-    return NextResponse.json({ error: "start.gg に未ログインです" }, { status: 401 });
-  }
-  return null;
-}
 
 async function resolveOperatorUserId(accessToken: string, fallback: string) {
   try {
@@ -107,8 +99,8 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { tournamentId: string; participantId: string } },
 ) {
-  const unauthorized = ensureAuthenticated();
-  if (unauthorized) return unauthorized;
+  const access = await ensureOperatorAccess(request, params.tournamentId);
+  if (!access.ok) return access.response;
 
   const body = await request.json().catch(() => null);
   if (!body) {
@@ -118,8 +110,9 @@ export async function POST(
   const delta = Number(body.deltaAmount ?? 0);
   const reasonLabel = String(body.reasonLabel || "").trim();
   const requestedUserId = String(body.operatorUserId || "operator").trim();
-  const accessToken = cookies().get("startgg_access_token")?.value || "";
-  const operatorUserId = await resolveOperatorUserId(accessToken, requestedUserId);
+  const operatorUserId = access.result.accessToken
+    ? await resolveOperatorUserId(access.result.accessToken, requestedUserId)
+    : (requestedUserId || access.result.operatorHandle);
 
   try {
     const firestore = ensureFirestore();
@@ -160,15 +153,17 @@ export async function POST(
             .filter(Boolean),
         );
         const exceptions = new Set(
-          Array.isArray(config?.exceptionParticipantIds)
-            ? config.exceptionParticipantIds.map((id: any) => String(id || "").trim()).filter(Boolean)
-            : [],
+          Array.isArray(config?.exceptionPlayerNames)
+            ? config.exceptionPlayerNames.map((name: any) => String(name || "").trim()).filter(Boolean)
+            : Array.isArray(config?.exceptionParticipantIds)
+              ? config.exceptionParticipantIds.map((id: any) => String(id || "").trim()).filter(Boolean)
+              : [],
         );
         const reservePrefix = String(config?.reserveLabelPrefix || "予備台").trim() || "予備台";
         const normalLabels = buildSeatLabels(String(config?.pattern || "{Alphabet:A:D}-{Int:1:4}"), allSnap.size + 1);
         if (!normalLabels.length) {
           autoSeatLabel = nextReserveLabel(reservePrefix, used);
-        } else if (exceptions.has(params.participantId)) {
+        } else if (exceptions.has(String(existing.playerName || "").trim()) || exceptions.has(params.participantId)) {
           autoSeatLabel = nextReserveLabel(reservePrefix, used);
         } else {
           autoSeatLabel = normalLabels.find((label) => !used.has(label)) || nextReserveLabel(reservePrefix, used);
