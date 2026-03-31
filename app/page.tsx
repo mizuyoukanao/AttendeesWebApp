@@ -297,6 +297,7 @@ export default function HomePage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [filter, setFilter] = useState<"all" | "checkedIn" | "notCheckedIn">("all");
   const [venueFeeFilter, setVenueFeeFilter] = useState("all");
+  const [sortOrder, setSortOrder] = useState<"idAsc" | "idDesc" | "nameAsc" | "nameDesc">("idAsc");
   const [seatAssignmentConfig, setSeatAssignmentConfig] = useState<SeatAssignmentConfig>(defaultSeatAssignmentConfig);
   const [assignmentMessage, setAssignmentMessage] = useState("");
   const [assignmentSaving, setAssignmentSaving] = useState(false);
@@ -473,12 +474,14 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
-    if (!tournamentId || !authSession.authenticated) return;
+    if (!tournamentId || !hasOperatorAccess) return;
     loadPricingConfig(tournamentId);
-    loadSeatAssignmentConfig(tournamentId);
-    loadAccessCodeHistory();
+    if (authSession.authenticated) {
+      loadSeatAssignmentConfig(tournamentId);
+      loadAccessCodeHistory();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tournamentId, authSession.authenticated]);
+  }, [tournamentId, authSession.authenticated, hasOperatorAccess]);
 
   useEffect(() => {
     let unsubscribe: Unsubscribe | null = null;
@@ -553,7 +556,10 @@ export default function HomePage() {
   async function loadPricingConfig(targetId: string) {
     setPricingMessage(`料金設定(${targetId})を取得中...`);
     try {
-      const res = await fetch(`/api/tournaments/${encodeURIComponent(targetId)}/pricing`);
+      const headers = buildOperatorHeaders();
+      const res = await fetch(`/api/tournaments/${encodeURIComponent(targetId)}/pricing`, {
+        headers,
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || res.statusText);
       const config = (data.pricingConfig as PricingConfig) || defaultPricingConfig;
@@ -1235,7 +1241,7 @@ export default function HomePage() {
   }, [venueFeeOptions, venueFeeFilter]);
 
   const filteredParticipants = useMemo(() => {
-    return participants.filter((p) => {
+    const filtered = participants.filter((p) => {
       const matchesSearch = getDisplayName(p).toLowerCase().includes(searchTerm.toLowerCase()) ||
         p.participantId.includes(searchTerm);
       const matchesFilter =
@@ -1245,7 +1251,13 @@ export default function HomePage() {
       const matchesVenueFee = venueFeeFilter === "all" || (p.venueFeeName || "") === venueFeeFilter;
       return matchesSearch && matchesFilter && matchesVenueFee;
     });
-  }, [participants, searchTerm, filter, venueFeeFilter]);
+    return filtered.sort((a, b) => {
+      if (sortOrder === "idAsc") return a.participantId.localeCompare(b.participantId, "en", { numeric: true });
+      if (sortOrder === "idDesc") return b.participantId.localeCompare(a.participantId, "en", { numeric: true });
+      if (sortOrder === "nameAsc") return getDisplayName(a).localeCompare(getDisplayName(b), "ja");
+      return getDisplayName(b).localeCompare(getDisplayName(a), "ja");
+    });
+  }, [participants, searchTerm, filter, venueFeeFilter, sortOrder]);
 
   const assignmentTargets = useMemo(() => {
     if (!seatAssignmentConfig.bulk.venueFeeNames.length) return [];
@@ -1886,6 +1898,7 @@ export default function HomePage() {
                     type="checkbox"
                     checked={seatAssignmentConfig.bulk.venueFeeNames.includes(name)}
                     onChange={() => toggleAssignmentVenueFee(name, "bulk")}
+                    disabled={!authSession.authenticated}
                   />
                   {name}
                 </label>
@@ -1898,16 +1911,18 @@ export default function HomePage() {
                 value={seatAssignmentConfig.bulk.pattern}
                 onChange={(e) => setSeatAssignmentConfig((prev) => ({ ...prev, bulk: { ...prev.bulk, pattern: e.target.value } }))}
                 placeholder="{Alphabet:A:D}-{Int:1:4}"
+                disabled={!authSession.authenticated}
               />
               <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <input
                   type="checkbox"
                   checked={overwriteSeatAssignment}
                   onChange={(e) => setOverwriteSeatAssignment(e.target.checked)}
+                  disabled={!authSession.authenticated}
                 />
                 既存の台番号を上書き
               </label>
-              <button className="button" type="button" onClick={assignSeatsByPattern}>一括割り当て実行</button>
+              <button className="button" type="button" onClick={assignSeatsByPattern} disabled={!authSession.authenticated}>一括割り当て実行</button>
             </div>
             <label className="label">強制的に予備台へ割り当てるプレイヤー名（カンマ or 改行区切り）</label>
             <input
@@ -1919,6 +1934,7 @@ export default function HomePage() {
                 bulk: { ...prev.bulk, exceptionPlayerNames: parseCsvList(e.target.value) },
               }))}
               placeholder="Skyline, Luna"
+              disabled={!authSession.authenticated}
             />
             <datalist id="player-name-suggestions">
               {playerNameOptions.map((name) => (
@@ -1931,6 +1947,7 @@ export default function HomePage() {
               value={seatAssignmentConfig.bulk.reserveLabelPrefix}
               onChange={(e) => setSeatAssignmentConfig((prev) => ({ ...prev, bulk: { ...prev.bulk, reserveLabelPrefix: e.target.value } }))}
               placeholder="予備台"
+              disabled={!authSession.authenticated}
             />
             <div className="muted">
               対象人数: {assignmentTargets.length}名 / 生成プレビュー: {seatLabelPreview.length ? seatLabelPreview.join(", ") : "（未生成）"}
@@ -1945,6 +1962,7 @@ export default function HomePage() {
                   ...prev,
                   autoOnCheckin: { ...prev.autoOnCheckin, enabled: e.target.checked },
                 }))}
+                disabled={!authSession.authenticated}
               />
               チェックイン時に自動で対戦台を割り当てる
             </label>
@@ -1955,6 +1973,7 @@ export default function HomePage() {
                     type="checkbox"
                     checked={seatAssignmentConfig.autoOnCheckin.venueFeeNames.includes(name)}
                     onChange={() => toggleAssignmentVenueFee(name, "autoOnCheckin")}
+                    disabled={!authSession.authenticated}
                   />
                   {name}
                 </label>
@@ -1968,6 +1987,7 @@ export default function HomePage() {
                 autoOnCheckin: { ...prev.autoOnCheckin, pattern: e.target.value },
               }))}
               placeholder="{Alphabet:A:D}-{Int:1:4}"
+              disabled={!authSession.authenticated}
             />
             <input
               className="input"
@@ -1978,6 +1998,7 @@ export default function HomePage() {
                 autoOnCheckin: { ...prev.autoOnCheckin, exceptionPlayerNames: parseCsvList(e.target.value) },
               }))}
               placeholder="自動割り当てで予備台にするプレイヤー名（カンマ or 改行区切り）"
+              disabled={!authSession.authenticated}
             />
             <datalist id="player-name-suggestions-auto">
               {playerNameOptions.map((name) => (
@@ -1992,12 +2013,13 @@ export default function HomePage() {
                 autoOnCheckin: { ...prev.autoOnCheckin, reserveLabelPrefix: e.target.value },
               }))}
               placeholder="予備台"
+              disabled={!authSession.authenticated}
             />
             <div className="flex" style={{ gap: 8, flexWrap: "wrap" }}>
-              <button className="button secondary" type="button" onClick={saveSeatAssignmentConfig} disabled={assignmentSaving}>
+              <button className="button secondary" type="button" onClick={saveSeatAssignmentConfig} disabled={assignmentSaving || !authSession.authenticated}>
                 {assignmentSaving ? "保存中..." : "台番号設定を保存"}
               </button>
-              <button className="button secondary" type="button" onClick={() => loadSeatAssignmentConfig(tournamentId)} disabled={!tournamentId}>
+              <button className="button secondary" type="button" onClick={() => loadSeatAssignmentConfig(tournamentId)} disabled={!tournamentId || !authSession.authenticated}>
                 設定を再読み込み
               </button>
             </div>
@@ -2022,23 +2044,16 @@ export default function HomePage() {
                 <option key={name} value={name}>{name}</option>
               ))}
             </select>
+            <select className="select" value={sortOrder} onChange={(e) => setSortOrder(e.target.value as typeof sortOrder)}>
+              <option value="idAsc">ID昇順</option>
+              <option value="idDesc">ID降順</option>
+              <option value="nameAsc">名前昇順</option>
+              <option value="nameDesc">名前降順</option>
+            </select>
           </div>
 
-          <div className="table-container">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>プレイヤー名</th>
-                <th>枠</th>
-                <th>台番号</th>
-                <th>支払い</th>
-                <th>チェックイン</th>
-                <th>editNotes</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
+          {isMobileViewport ? (
+            <div className="stack" style={{ gap: 10 }}>
               {filteredParticipants.map((p) => {
                 const status = computePaymentStatus(
                   p,
@@ -2048,38 +2063,80 @@ export default function HomePage() {
                   pricingConfig,
                 );
                 return (
-                  <tr key={p.participantId}>
-                    <td>{p.participantId}</td>
-                    <td>{getDisplayName(p)}</td>
-                    <td>{p.venueFeeName || "-"}</td>
-                    <td>{p.adminNotes || "-"}</td>
-                    <td>
+                  <div key={p.participantId} className="card" style={{ background: "#0d1117" }}>
+                    <div className="flex-between">
+                      <strong>{getDisplayName(p)}</strong>
                       <span className={clsx("status", status.status === "prepaid" ? "success" : "danger")}>{status.label}</span>
-                    </td>
-                    <td>{p.checkedIn ? formatTimestampJst(new Date(p.checkedInAt || "")) : "未"}</td>
-                    <td>{p.editNotes || ""}</td>
-                    <td>
-                      <button
-                        className="button secondary"
-                        type="button"
-                        onClick={() => {
-                          openParticipantEditor(p);
-                        }}
-                      >
-                        編集
-                      </button>
-                    </td>
-                  </tr>
+                    </div>
+                    <div className="muted">ID: {p.participantId}</div>
+                    <div className="muted">枠: {p.venueFeeName || "-"}</div>
+                    <div className="muted">台番号: {p.adminNotes || "-"}</div>
+                    <div className="muted">チェックイン: {p.checkedIn ? formatTimestampJst(new Date(p.checkedInAt || "")) : "未"}</div>
+                    {p.editNotes && <div className="muted">editNotes: {p.editNotes}</div>}
+                    <button className="button secondary" type="button" onClick={() => openParticipantEditor(p)}>編集</button>
+                  </div>
                 );
               })}
-              {filteredParticipants.length === 0 && (
-                <tr>
-                  <td colSpan={8} className="muted">該当データがありません</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-          </div>
+              {filteredParticipants.length === 0 && <div className="muted">該当データがありません</div>}
+            </div>
+          ) : (
+            <div className="table-container">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>プレイヤー名</th>
+                    <th>枠</th>
+                    <th>台番号</th>
+                    <th>支払い</th>
+                    <th>チェックイン</th>
+                    <th>editNotes</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredParticipants.map((p) => {
+                    const status = computePaymentStatus(
+                      p,
+                      false,
+                      { key: "none", label: "変更なし", deltaAmount: 0, requiresReason: false },
+                      0,
+                      pricingConfig,
+                    );
+                    return (
+                      <tr key={p.participantId}>
+                        <td>{p.participantId}</td>
+                        <td>{getDisplayName(p)}</td>
+                        <td>{p.venueFeeName || "-"}</td>
+                        <td>{p.adminNotes || "-"}</td>
+                        <td>
+                          <span className={clsx("status", status.status === "prepaid" ? "success" : "danger")}>{status.label}</span>
+                        </td>
+                        <td>{p.checkedIn ? formatTimestampJst(new Date(p.checkedInAt || "")) : "未"}</td>
+                        <td>{p.editNotes || ""}</td>
+                        <td>
+                          <button
+                            className="button secondary"
+                            type="button"
+                            onClick={() => {
+                              openParticipantEditor(p);
+                            }}
+                          >
+                            編集
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {filteredParticipants.length === 0 && (
+                    <tr>
+                      <td colSpan={8} className="muted">該当データがありません</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
             </>
           )}
         </div>
