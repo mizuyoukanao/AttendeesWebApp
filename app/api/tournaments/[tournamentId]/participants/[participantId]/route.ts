@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
+import { ensureOperatorAccess } from "@/lib/operatorAccess";
 
 function formatTimestampJst(date: Date) {
   const offsetMs = 9 * 60 * 60 * 1000;
@@ -15,14 +15,6 @@ function formatTimestampJst(date: Date) {
 }
 
 const GRAPHQL_URL = "https://api.start.gg/gql/alpha";
-
-function ensureAuthenticated() {
-  const accessToken = cookies().get("startgg_access_token")?.value;
-  if (!accessToken) {
-    return NextResponse.json({ error: "start.gg に未ログインです" }, { status: 401 });
-  }
-  return null;
-}
 
 async function resolveOperatorUserId(accessToken: string, fallback: string) {
   try {
@@ -47,8 +39,8 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: { tournamentId: string; participantId: string } },
 ) {
-  const unauthorized = ensureAuthenticated();
-  if (unauthorized) return unauthorized;
+  const access = await ensureOperatorAccess(request, params.tournamentId);
+  if (!access.ok) return access.response;
 
   const body = await request.json().catch(() => null);
   if (!body) {
@@ -61,8 +53,9 @@ export async function PATCH(
   const delta = Number(body.deltaAmount ?? 0);
   const reasonLabel = String(body.reasonLabel || "編集").trim();
   const requestedUserId = String(body.operatorUserId || "operator").trim();
-  const accessToken = cookies().get("startgg_access_token")?.value || "";
-  const operatorUserId = await resolveOperatorUserId(accessToken, requestedUserId);
+  const operatorUserId = access.result.accessToken
+    ? await resolveOperatorUserId(access.result.accessToken, requestedUserId)
+    : (requestedUserId || access.result.operatorHandle);
 
   try {
     const firestore = ensureFirestore();

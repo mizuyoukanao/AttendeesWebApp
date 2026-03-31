@@ -95,6 +95,19 @@ type AuthSession = {
   };
 };
 
+type CodeAccessSession = {
+  active: boolean;
+  code: string;
+  handleName: string;
+};
+
+type AccessCodeRecord = {
+  code: string;
+  status: "active" | "disabled" | "deleted";
+  createdAt: string;
+  updatedAt: string;
+};
+
 type ManagedTournament = {
   id: string;
   name: string;
@@ -114,7 +127,7 @@ type PaymentStatus = {
 type SeatPatternConfig = {
   venueFeeNames: string[];
   pattern: string;
-  exceptionParticipantIds: string[];
+  exceptionPlayerNames: string[];
   reserveLabelPrefix: string;
 };
 
@@ -126,7 +139,7 @@ type SeatAssignmentConfig = {
 const defaultSeatPatternConfig: SeatPatternConfig = {
   venueFeeNames: [],
   pattern: "{Alphabet:A:D}-{Int:1:4}",
-  exceptionParticipantIds: [],
+  exceptionPlayerNames: [],
   reserveLabelPrefix: "予備台",
 };
 
@@ -285,6 +298,15 @@ export default function HomePage() {
   const scannerContainerRef = useRef<HTMLDivElement>(null);
   const lostFoundScannerContainerRef = useRef<HTMLDivElement>(null);
   const [authSession, setAuthSession] = useState<AuthSession>({ authenticated: false });
+  const [codeAccessSession, setCodeAccessSession] = useState<CodeAccessSession>({ active: false, code: "", handleName: "" });
+  const [accessCodeInput, setAccessCodeInput] = useState("");
+  const [accessHandleInput, setAccessHandleInput] = useState("");
+  const [accessOverlayOpen, setAccessOverlayOpen] = useState(true);
+  const [accessMessage, setAccessMessage] = useState("");
+  const [issuingAccessCode, setIssuingAccessCode] = useState(false);
+  const [issuedAccessCode, setIssuedAccessCode] = useState("");
+  const [accessCodeHistory, setAccessCodeHistory] = useState<AccessCodeRecord[]>([]);
+  const [accessCodeAdminMessage, setAccessCodeAdminMessage] = useState("");
   const [authError, setAuthError] = useState("");
   const [managedTournaments, setManagedTournaments] = useState<ManagedTournament[]>([]);
   const [tournamentLoading, setTournamentLoading] = useState(false);
@@ -292,6 +314,14 @@ export default function HomePage() {
   const [tournamentError, setTournamentError] = useState("");
   const [isMobileViewport, setIsMobileViewport] = useState(false);
   const compactKiosk = isMobileViewport;
+  const hasOperatorAccess = authSession.authenticated || codeAccessSession.active;
+  const activeAccessCode = accessCodeHistory.find((item) => item.status === "active")?.code || issuedAccessCode;
+  const shareUrl = typeof window !== "undefined" && activeAccessCode
+    ? `${window.location.origin}${window.location.pathname}?tournamentId=${encodeURIComponent(tournamentId)}&code=${encodeURIComponent(activeAccessCode)}`
+    : "";
+  const shareQrUrl = shareUrl
+    ? `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(shareUrl)}`
+    : "";
 
   const adjustmentOption = useMemo(
     () => {
@@ -306,7 +336,7 @@ export default function HomePage() {
   }, [editAdjustmentKey, pricingConfig]);
 
   useEffect(() => {
-    if (activeTab !== "kiosk" || !authSession.authenticated) {
+    if (activeTab !== "kiosk" || !hasOperatorAccess) {
       return undefined;
     }
     if (!scannerContainerRef.current) {
@@ -330,10 +360,10 @@ export default function HomePage() {
     return () => {
       scanner.clear().catch(() => {});
     };
-  }, [activeTab, authSession.authenticated, tournamentId]);
+  }, [activeTab, hasOperatorAccess, tournamentId]);
 
   useEffect(() => {
-    if (activeTab !== "lostFound" || !authSession.authenticated) {
+    if (activeTab !== "lostFound" || !hasOperatorAccess) {
       return undefined;
     }
     if (!lostFoundScannerContainerRef.current) {
@@ -354,19 +384,37 @@ export default function HomePage() {
     return () => {
       scanner.clear().catch(() => {});
     };
-  }, [activeTab, authSession.authenticated, tournamentId, participants]);
+  }, [activeTab, hasOperatorAccess, tournamentId, participants]);
 
   useEffect(() => {
     refreshSession();
   }, []);
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const queryTournamentId = params.get("tournamentId");
+    const queryCode = params.get("code");
+    if (queryTournamentId) {
+      setTournamentId(queryTournamentId);
+    }
+    if (queryCode) {
+      setAccessCodeInput(queryCode);
+    }
+  }, []);
+
+  useEffect(() => {
+    setAccessOverlayOpen(!hasOperatorAccess);
+  }, [hasOperatorAccess]);
+
+  useEffect(() => {
     if (authSession.authenticated) {
       fetchManagedTournaments();
+      loadAccessCodeHistory();
     } else {
       setManagedTournaments([]);
       setTournamentMessage("");
       setTournamentError("");
+      setAccessCodeHistory([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authSession.authenticated]);
@@ -383,11 +431,12 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
-    if (!tournamentId) return;
+    if (!tournamentId || !authSession.authenticated) return;
     loadPricingConfig(tournamentId);
     loadSeatAssignmentConfig(tournamentId);
+    loadAccessCodeHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tournamentId]);
+  }, [tournamentId, authSession.authenticated]);
 
   useEffect(() => {
     let unsubscribe: Unsubscribe | null = null;
@@ -454,11 +503,6 @@ export default function HomePage() {
       setSelectedAdjustment(pricingConfig.adjustmentOptions[0].key);
     }
   }, [pricingConfig, selectedAdjustment]);
-
-  useEffect(() => {
-    if (!scanResult) return;
-    openParticipantEditor(scanResult);
-  }, [scanResult, pricingConfig.adjustmentOptions]);
 
   function adjustmentOptions(): AdjustmentOption[] {
     return pricingConfig.adjustmentOptions;
@@ -603,6 +647,109 @@ export default function HomePage() {
     }
   }
 
+  function buildOperatorHeaders() {
+    const headers: Record<string, string> = {};
+    if (codeAccessSession.active) {
+      headers["x-tournament-access-code"] = codeAccessSession.code;
+      headers["x-operator-handle"] = codeAccessSession.handleName || "code-operator";
+    }
+    return headers;
+  }
+
+  async function verifyTournamentAccessCode() {
+    if (!tournamentId) {
+      setAccessMessage("大会IDを選択してください");
+      return;
+    }
+    if (!accessCodeInput.trim()) {
+      setAccessMessage("大会コードを入力してください");
+      return;
+    }
+    setAccessMessage("コードを確認しています...");
+    try {
+      const res = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/access-code?code=${encodeURIComponent(accessCodeInput.trim())}`);
+      const data = await res.json();
+      if (!res.ok || !data.valid) {
+        throw new Error(data?.error || "コードが無効です");
+      }
+      setCodeAccessSession({
+        active: true,
+        code: accessCodeInput.trim(),
+        handleName: accessHandleInput.trim() || "code-operator",
+      });
+      setAccessMessage("");
+      setAccessOverlayOpen(false);
+    } catch (error: any) {
+      setAccessMessage(error?.message || "コード認証に失敗しました");
+    }
+  }
+
+  async function issueTournamentAccessCode() {
+    if (!authSession.authenticated) {
+      setAccessMessage("コード発行にはstart.ggログインが必要です");
+      return;
+    }
+    if (!tournamentId) {
+      setAccessMessage("大会を選択してください");
+      return;
+    }
+    setIssuingAccessCode(true);
+    try {
+      const res = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/access-code`, {
+        method: "POST",
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || res.statusText);
+      setIssuedAccessCode(String(data.accessCode || ""));
+      setAccessMessage("大会コードを発行しました");
+      await loadAccessCodeHistory();
+    } catch (error: any) {
+      setAccessMessage(error?.message || "コード発行に失敗しました");
+    } finally {
+      setIssuingAccessCode(false);
+    }
+  }
+
+  async function loadAccessCodeHistory() {
+    if (!authSession.authenticated || !tournamentId) return;
+    try {
+      const res = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/access-code`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || res.statusText);
+      setIssuedAccessCode(String(data.accessCode || ""));
+      setAccessCodeHistory(Array.isArray(data.history) ? data.history : []);
+    } catch (error: any) {
+      setAccessCodeAdminMessage(error?.message || "大会コード履歴の取得に失敗しました");
+    }
+  }
+
+  async function updateAccessCodeStatus(code: string, action: "disable" | "delete" | "activate") {
+    if (!authSession.authenticated || !tournamentId) return;
+    try {
+      const res = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/access-code`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, action }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || res.statusText);
+      setAccessCodeAdminMessage(`コード ${code} を${action === "disable" ? "無効化" : action === "delete" ? "削除" : "有効化"}しました`);
+      await loadAccessCodeHistory();
+    } catch (error: any) {
+      setAccessCodeAdminMessage(error?.message || "大会コード更新に失敗しました");
+    }
+  }
+
+  async function copyShareUrl() {
+    if (!shareUrl) return;
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setAccessCodeAdminMessage("共有用URLをクリップボードにコピーしました");
+    } catch {
+      setAccessCodeAdminMessage("クリップボードへのコピーに失敗しました");
+    }
+  }
+
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     setAuthSession({ authenticated: false });
@@ -712,8 +859,8 @@ export default function HomePage() {
   async function handleCheckIn() {
     if (!scanResult) return;
     if (scanResult.checkedIn) return;
-    if (!authSession.authenticated) {
-      setKioskMessage("チェックインにはstart.ggログインが必要です");
+    if (!hasOperatorAccess) {
+      setKioskMessage("チェックインにはstart.ggログインまたは大会コード認証が必要です");
       return;
     }
     if (!tournamentId) {
@@ -734,11 +881,14 @@ export default function HomePage() {
         `/api/tournaments/${encodeURIComponent(tournamentId)}/participants/${encodeURIComponent(scanResult.participantId)}/checkin`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...buildOperatorHeaders(),
+          },
           body: JSON.stringify({
             deltaAmount: delta,
             reasonLabel,
-            operatorUserId: authSession.user?.id || "operator-demo",
+            operatorUserId: authSession.user?.id || codeAccessSession.handleName || "operator-demo",
           }),
         },
       );
@@ -755,9 +905,9 @@ export default function HomePage() {
   }
 
   async function updateParticipantStatus(target: Participant, resetCheckIn: boolean) {
-    if (!tournamentId || !authSession.authenticated) {
-      const msg = !authSession.authenticated
-        ? "編集にはstart.ggログインが必要です"
+    if (!tournamentId || !hasOperatorAccess) {
+      const msg = !hasOperatorAccess
+        ? "編集にはstart.ggログインまたは大会コード認証が必要です"
         : "対象大会を選択してください";
       setOperatorMessage(msg);
       setKioskMessage(msg);
@@ -773,14 +923,17 @@ export default function HomePage() {
         `/api/tournaments/${encodeURIComponent(tournamentId)}/participants/${encodeURIComponent(target.participantId)}`,
         {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...buildOperatorHeaders(),
+          },
           body: JSON.stringify({
             adminNotes: editAdminNotes,
             deltaAmount: delta,
             reasonLabel,
             resetCheckIn,
             checkedIn: editCheckedIn,
-            operatorUserId: authSession.user?.id || "operator-demo",
+            operatorUserId: authSession.user?.id || codeAccessSession.handleName || "operator-demo",
           }),
         },
       );
@@ -818,7 +971,7 @@ export default function HomePage() {
     }));
   }
 
-  function parseParticipantIdsCsv(value: string) {
+  function parseCsvList(value: string) {
     return value
       .split(/[\n,]/)
       .map((v) => v.trim())
@@ -948,8 +1101,43 @@ export default function HomePage() {
     });
   }
 
+  function exportParticipantsCsv() {
+    if (!participants.length) {
+      setOperatorMessage("エクスポート対象の参加者データがありません");
+      return;
+    }
+
+    const sorted = [...participants].sort((a, b) => a.participantId.localeCompare(b.participantId, "en", { numeric: true }));
+    const rows = sorted.map((participant) => ({
+      ID: participant.participantId,
+      プレイヤー名: getDisplayName(participant),
+      枠: participant.venueFeeName || "",
+      台番号: participant.adminNotes || "",
+      支払い: `totalTransaction=${participant.payment.totalTransaction}, totalOwed=${participant.payment.totalOwed}, totalPaid=${participant.payment.totalPaid ?? 0}`,
+      チェックイン: participant.checkedIn ? "true" : "false",
+      editNotes: participant.editNotes || "",
+    }));
+    const csv = Papa.unparse(rows);
+    const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    const date = new Date();
+    const yyyymmdd = `${date.getFullYear()}${`${date.getMonth() + 1}`.padStart(2, "0")}${`${date.getDate()}`.padStart(2, "0")}`;
+    anchor.href = url;
+    anchor.download = `participants_export_${tournamentId || "unknown"}_${yyyymmdd}.csv`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    setOperatorMessage(`CSVをエクスポートしました（${rows.length}件）`);
+  }
+
   const venueFeeOptions = useMemo(
     () => Array.from(new Set(participants.map((p) => (p.venueFeeName || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, "ja")),
+    [participants],
+  );
+  const playerNameOptions = useMemo(
+    () => Array.from(new Set(participants.map((p) => getDisplayName(p).trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, "ja")),
     [participants],
   );
 
@@ -1001,7 +1189,7 @@ export default function HomePage() {
     : null;
 
   const disableSubmit = !tournamentId || !scanResult || scanResult.checkedIn ||
-    !authSession.authenticated ||
+    !hasOperatorAccess ||
     (adjustmentOption.requiresReason && (!customReason.trim() || customAmount === 0));
   const disableEditSave = !editingParticipant ||
     (editAdjustmentOption?.requiresReason && (!editCustomReason.trim() || editCustomAmount === 0));
@@ -1076,6 +1264,39 @@ export default function HomePage() {
           未チェックインに戻す
         </button>
       </div>
+      </div>
+    </div>
+  ) : null;
+
+  const accessOverlay = accessOverlayOpen ? (
+    <div className="editor-modal-backdrop">
+      <div className="stack editor-modal" style={{ maxWidth: 520 }}>
+        <div style={{ fontWeight: 700, fontSize: 18 }}>受付モードを選択してください</div>
+        <div className="muted">
+          start.ggログインまたは大会固有コードで認証すると、受付・チェックイン・チェックイン状況の閲覧が可能になります。
+        </div>
+        <a className="button" href="/api/auth/login" style={{ textAlign: "center" }}>start.ggでログイン</a>
+        <div className="divider" />
+        <label className="label" htmlFor="access-code-input">大会固有コード</label>
+        <input
+          id="access-code-input"
+          className="input"
+          value={accessCodeInput}
+          onChange={(e) => setAccessCodeInput(e.target.value)}
+          placeholder="例: ABCD-1234"
+        />
+        <label className="label" htmlFor="access-handle-input">ハンドルネーム（任意）</label>
+        <input
+          id="access-handle-input"
+          className="input"
+          value={accessHandleInput}
+          onChange={(e) => setAccessHandleInput(e.target.value)}
+          placeholder="受付担当名"
+        />
+        <button className="button secondary" type="button" onClick={verifyTournamentAccessCode}>
+          コードで認証
+        </button>
+        {accessMessage && <div className="toast">{accessMessage}</div>}
       </div>
     </div>
   ) : null;
@@ -1165,7 +1386,7 @@ export default function HomePage() {
               ))}
             </select>
             <div ref={scannerContainerRef} style={{ borderRadius: 12, overflow: "hidden" }} />
-            {!authSession.authenticated && <div className="toast">チェックイン処理にはstart.ggログインが必要です。</div>}
+            {!hasOperatorAccess && <div className="toast">チェックイン処理にはstart.ggログインまたは大会コード認証が必要です。</div>}
             <div className="divider" />
             <label className="label" htmlFor="manual-qr">手動入力（QR文字列）</label>
             <input
@@ -1174,10 +1395,10 @@ export default function HomePage() {
               value={scanRaw}
               onChange={(e) => setScanRaw(e.target.value)}
               placeholder="http://www.start.gg/api/-/gg_api./participant/01234567/qr?token=..."
-              disabled={!authSession.authenticated}
+              disabled={!hasOperatorAccess}
             />
             <div className="flex" style={{ marginTop: 8 }}>
-              <button className="button" onClick={handleManualLookup} disabled={!authSession.authenticated}>参加者を照合</button>
+              <button className="button" onClick={handleManualLookup} disabled={!hasOperatorAccess}>参加者を照合</button>
               {scannerError && <span className="muted">{scannerError}</span>}
             </div>
             {kioskMessage && <div className="toast success" style={{ marginTop: 8 }}>{kioskMessage}</div>}
@@ -1278,7 +1499,7 @@ export default function HomePage() {
               大会を選択した状態で、遺失物に付与されたQR（参加者チェックインQRと同形式）を読み取ると、持ち主と対戦台番号を表示します。
             </p>
             {!tournamentId && <div className="toast danger">先に対象大会を選択してください。</div>}
-            {!authSession.authenticated && <div className="toast">読み取りにはstart.ggログインが必要です。</div>}
+            {!hasOperatorAccess && <div className="toast">読み取りにはstart.ggログインまたは大会コード認証が必要です。</div>}
             <div ref={lostFoundScannerContainerRef} style={{ borderRadius: 12, overflow: "hidden" }} />
             <div className="divider" />
             <label className="label" htmlFor="lost-found-manual-qr">手動入力（QR文字列）</label>
@@ -1288,10 +1509,10 @@ export default function HomePage() {
               value={lostFoundRaw}
               onChange={(e) => setLostFoundRaw(e.target.value)}
               placeholder="http://www.start.gg/api/-/gg_api./participant/01234567/qr?token=..."
-              disabled={!authSession.authenticated}
+              disabled={!hasOperatorAccess}
             />
             <div className="flex" style={{ marginTop: 8 }}>
-              <button className="button" type="button" onClick={handleLostFoundManualLookup} disabled={!authSession.authenticated}>
+              <button className="button" type="button" onClick={handleLostFoundManualLookup} disabled={!hasOperatorAccess}>
                 持ち主を照合
               </button>
               {lostFoundError && <span className="muted">{lostFoundError}</span>}
@@ -1400,7 +1621,7 @@ export default function HomePage() {
             <div className="section-title">差額オプション</div>
             <div className="stack" style={{ gap: 12 }}>
               {pricingConfig.adjustmentOptions.map((opt, index) => (
-                <div key={opt.key || index} className="card" style={{ background: "#0d1117" }}>
+                <div key={index} className="card" style={{ background: "#0d1117" }}>
                   <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8 }}>
                     <div className="stack">
                       <label className="label">サーバー保存キー</label>
@@ -1477,6 +1698,72 @@ export default function HomePage() {
                 <div className="toast">未ログインです。上のボタンからログインを行ってください。</div>
               )}
               {authError && <div className="toast danger">{authError}</div>}
+              <div className="divider" />
+              <div className="section-title" style={{ marginBottom: 0 }}>大会固有コード発行（ログイン必須）</div>
+              <button
+                className="button secondary"
+                type="button"
+                onClick={issueTournamentAccessCode}
+                disabled={!authSession.authenticated || issuingAccessCode || !tournamentId}
+              >
+                {issuingAccessCode ? "発行中..." : "大会コードを発行 / 再発行"}
+              </button>
+              <button
+                className="button secondary"
+                type="button"
+                onClick={loadAccessCodeHistory}
+                disabled={!authSession.authenticated || !tournamentId}
+              >
+                履歴を再取得
+              </button>
+              {activeAccessCode && <div className="code">現在有効なコード: {activeAccessCode}</div>}
+              {shareUrl && (
+                <div className="stack">
+                  <input className="input" value={shareUrl} readOnly />
+                  <button className="button secondary" type="button" onClick={copyShareUrl}>共有URLをコピー</button>
+                  {shareQrUrl && <img src={shareQrUrl} alt="大会コード共有QR" style={{ width: 220, height: 220, borderRadius: 8 }} />}
+                </div>
+              )}
+              <div className="stack">
+                {accessCodeHistory.map((item) => (
+                  <div key={`${item.code}-${item.createdAt}`} className="card" style={{ background: "#0d1117" }}>
+                    <div className="flex-between">
+                      <code>{item.code}</code>
+                      <span className={clsx("status", item.status === "active" ? "success" : "danger")}>{item.status}</span>
+                    </div>
+                    <div className="muted">発行: {item.createdAt || "-"}</div>
+                    <div className="muted">更新: {item.updatedAt || "-"}</div>
+                    <div className="flex" style={{ gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+                      <button
+                        className="button secondary"
+                        type="button"
+                        onClick={() => updateAccessCodeStatus(item.code, "activate")}
+                        disabled={item.status === "active"}
+                      >
+                        有効化
+                      </button>
+                      <button
+                        className="button secondary"
+                        type="button"
+                        onClick={() => updateAccessCodeStatus(item.code, "disable")}
+                        disabled={item.status !== "active"}
+                      >
+                        無効化
+                      </button>
+                      <button
+                        className="button secondary"
+                        type="button"
+                        onClick={() => updateAccessCodeStatus(item.code, "delete")}
+                        disabled={item.status === "deleted"}
+                      >
+                        削除
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {accessCodeHistory.length === 0 && <div className="muted">履歴はまだありません</div>}
+              </div>
+              {accessCodeAdminMessage && <div className="toast">{accessCodeAdminMessage}</div>}
             </div>
           </div>
 
@@ -1493,6 +1780,11 @@ export default function HomePage() {
               className="input"
               disabled={!authSession.authenticated}
             />
+            <div className="flex" style={{ marginTop: 8, gap: 8 }}>
+              <button className="button secondary" type="button" onClick={exportParticipantsCsv}>
+                最新参加者CSVをエクスポート
+              </button>
+            </div>
             {operatorMessage && <div className="toast" style={{ marginTop: 8 }}>{operatorMessage}</div>}
             <div className="divider" />
             <div className="muted">個人情報はアップロード前に破棄されます。CSVが再アップロードされた際は、チェックイン状況のみ維持したまま上書きします。</div>
@@ -1503,8 +1795,8 @@ export default function HomePage() {
       {activeTab === "dashboard" && (
         <div className="card">
           <div className="section-title">チェックイン状況</div>
-          {!authSession.authenticated && <div className="toast">一覧の閲覧にはstart.ggログインが必要です。</div>}
-          {authSession.authenticated && (
+          {!hasOperatorAccess && <div className="toast">一覧の閲覧にはstart.ggログインまたは大会コード認証が必要です。</div>}
+          {hasOperatorAccess && (
             <>
           <div className="stack" style={{ marginBottom: 12 }}>
             <div className="section-title" style={{ marginBottom: 0 }}>対戦台の一括割り当て</div>
@@ -1541,17 +1833,22 @@ export default function HomePage() {
               </label>
               <button className="button" type="button" onClick={assignSeatsByPattern}>一括割り当て実行</button>
             </div>
-            <label className="label">強制的に予備台へ割り当てる参加者ID（カンマ or 改行区切り）</label>
-            <textarea
+            <label className="label">強制的に予備台へ割り当てるプレイヤー名（カンマ or 改行区切り）</label>
+            <input
               className="input"
-              value={seatAssignmentConfig.bulk.exceptionParticipantIds.join(", ")}
+              list="player-name-suggestions"
+              value={seatAssignmentConfig.bulk.exceptionPlayerNames.join(", ")}
               onChange={(e) => setSeatAssignmentConfig((prev) => ({
                 ...prev,
-                bulk: { ...prev.bulk, exceptionParticipantIds: parseParticipantIdsCsv(e.target.value) },
+                bulk: { ...prev.bulk, exceptionPlayerNames: parseCsvList(e.target.value) },
               }))}
-              placeholder="12345, 67890"
-              rows={2}
+              placeholder="Skyline, Luna"
             />
+            <datalist id="player-name-suggestions">
+              {playerNameOptions.map((name) => (
+                <option key={`bulk-name-${name}`} value={name} />
+              ))}
+            </datalist>
             <label className="label">予備台プレフィックス</label>
             <input
               className="input"
@@ -1596,16 +1893,21 @@ export default function HomePage() {
               }))}
               placeholder="{Alphabet:A:D}-{Int:1:4}"
             />
-            <textarea
+            <input
               className="input"
-              value={seatAssignmentConfig.autoOnCheckin.exceptionParticipantIds.join(", ")}
+              list="player-name-suggestions-auto"
+              value={seatAssignmentConfig.autoOnCheckin.exceptionPlayerNames.join(", ")}
               onChange={(e) => setSeatAssignmentConfig((prev) => ({
                 ...prev,
-                autoOnCheckin: { ...prev.autoOnCheckin, exceptionParticipantIds: parseParticipantIdsCsv(e.target.value) },
+                autoOnCheckin: { ...prev.autoOnCheckin, exceptionPlayerNames: parseCsvList(e.target.value) },
               }))}
-              placeholder="自動割り当てで予備台にする参加者ID（カンマ or 改行区切り）"
-              rows={2}
+              placeholder="自動割り当てで予備台にするプレイヤー名（カンマ or 改行区切り）"
             />
+            <datalist id="player-name-suggestions-auto">
+              {playerNameOptions.map((name) => (
+                <option key={`auto-name-${name}`} value={name} />
+              ))}
+            </datalist>
             <input
               className="input"
               value={seatAssignmentConfig.autoOnCheckin.reserveLabelPrefix}
@@ -1705,6 +2007,7 @@ export default function HomePage() {
         </div>
       )}
       {participantEditor}
+      {accessOverlay}
     </div>
   );
 }

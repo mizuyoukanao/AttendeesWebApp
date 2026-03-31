@@ -6,7 +6,7 @@ import { ensureFirestore } from "@/lib/firebaseAdmin";
 type SeatPatternConfig = {
   venueFeeNames: string[];
   pattern: string;
-  exceptionParticipantIds: string[];
+  exceptionPlayerNames: string[];
   reserveLabelPrefix: string;
 };
 
@@ -18,7 +18,7 @@ type SeatAssignmentConfig = {
 const defaultSeatPatternConfig: SeatPatternConfig = {
   venueFeeNames: [],
   pattern: "{Alphabet:A:D}-{Int:1:4}",
-  exceptionParticipantIds: [],
+  exceptionPlayerNames: [],
   reserveLabelPrefix: "予備台",
 };
 
@@ -44,9 +44,11 @@ function normalizePatternConfig(input: any): SeatPatternConfig {
       ? input.venueFeeNames.map((v: any) => String(v || "").trim()).filter(Boolean)
       : [],
     pattern: String(input?.pattern || defaultSeatPatternConfig.pattern).trim() || defaultSeatPatternConfig.pattern,
-    exceptionParticipantIds: Array.isArray(input?.exceptionParticipantIds)
-      ? input.exceptionParticipantIds.map((v: any) => String(v || "").trim()).filter(Boolean)
-      : [],
+    exceptionPlayerNames: Array.isArray(input?.exceptionPlayerNames)
+      ? input.exceptionPlayerNames.map((v: any) => String(v || "").trim()).filter(Boolean)
+      : Array.isArray(input?.exceptionParticipantIds)
+        ? input.exceptionParticipantIds.map((v: any) => String(v || "").trim()).filter(Boolean)
+        : [],
     reserveLabelPrefix: String(input?.reserveLabelPrefix || defaultSeatPatternConfig.reserveLabelPrefix).trim() || defaultSeatPatternConfig.reserveLabelPrefix,
   };
 }
