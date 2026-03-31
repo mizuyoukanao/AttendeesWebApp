@@ -118,6 +118,8 @@ type ManagedTournament = {
   countryCode?: string;
 };
 
+const TOURNAMENT_CACHE_KEY = "known_tournaments";
+
 type PaymentStatus = {
   status: "prepaid" | "due" | "refund";
   amount: number;
@@ -200,6 +202,16 @@ function describeTournament(t: ManagedTournament) {
   const name = t.name || t.slug || t.id;
   const suffix = [startDate, location].filter(Boolean).join(" | ");
   return suffix ? `${name} (${suffix})` : name;
+}
+
+function normalizeTournamentCache(input: unknown): ManagedTournament[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((item: any) => ({
+      id: String(item?.id || "").trim(),
+      name: String(item?.name || "").trim(),
+    }))
+    .filter((item) => item.id);
 }
 
 function expandAlphabetRange(start: string, end: string): string[] {
@@ -391,6 +403,37 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    try {
+      const cached = window.localStorage.getItem(TOURNAMENT_CACHE_KEY);
+      if (!cached) return;
+      const parsed = normalizeTournamentCache(JSON.parse(cached));
+      if (parsed.length > 0) {
+        setManagedTournaments((prev) => {
+          const merged = [...prev];
+          parsed.forEach((item) => {
+            if (!merged.some((current) => current.id === item.id)) {
+              merged.push(item);
+            }
+          });
+          return merged;
+        });
+      }
+    } catch {
+      // ignore storage parse errors
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!managedTournaments.length) return;
+    const minimal = managedTournaments.map((item) => ({ id: item.id, name: item.name || "" }));
+    try {
+      window.localStorage.setItem(TOURNAMENT_CACHE_KEY, JSON.stringify(minimal));
+    } catch {
+      // ignore storage write errors
+    }
+  }, [managedTournaments]);
+
+  useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const queryTournamentId = params.get("tournamentId");
     const queryCode = params.get("code");
@@ -411,7 +454,6 @@ export default function HomePage() {
       fetchManagedTournaments();
       loadAccessCodeHistory();
     } else {
-      setManagedTournaments([]);
       setTournamentMessage("");
       setTournamentError("");
       setAccessCodeHistory([]);
@@ -657,20 +699,38 @@ export default function HomePage() {
   }
 
   async function verifyTournamentAccessCode() {
-    if (!tournamentId) {
-      setAccessMessage("大会IDを選択してください");
-      return;
-    }
     if (!accessCodeInput.trim()) {
       setAccessMessage("大会コードを入力してください");
       return;
     }
     setAccessMessage("コードを確認しています...");
     try {
-      const res = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/access-code?code=${encodeURIComponent(accessCodeInput.trim())}`);
+      const res = await fetch(`/api/access-code/resolve?code=${encodeURIComponent(accessCodeInput.trim())}`);
       const data = await res.json();
-      if (!res.ok || !data.valid) {
+      if (!res.ok || !data.valid || !data?.tournamentId) {
         throw new Error(data?.error || "コードが無効です");
+      }
+      const tournamentName = typeof data?.tournamentName === "string" ? data.tournamentName.trim() : "";
+      const resolvedTournamentId = String(data.tournamentId || "").trim();
+      if (!resolvedTournamentId) {
+        throw new Error("大会IDの解決に失敗しました");
+      }
+      setTournamentId(resolvedTournamentId);
+      if (tournamentName) {
+        setManagedTournaments((prev) => {
+          const index = prev.findIndex((item) => item.id === resolvedTournamentId);
+          if (index >= 0) {
+            const next = [...prev];
+            next[index] = { ...next[index], name: tournamentName };
+            return next;
+          }
+          return [...prev, { id: resolvedTournamentId, name: tournamentName }];
+        });
+        setPricingName((prev) => prev || tournamentName);
+      } else {
+        setManagedTournaments((prev) => (
+          prev.some((item) => item.id === resolvedTournamentId) ? prev : [...prev, { id: resolvedTournamentId, name: resolvedTournamentId }]
+        ));
       }
       setCodeAccessSession({
         active: true,
@@ -695,8 +755,12 @@ export default function HomePage() {
     }
     setIssuingAccessCode(true);
     try {
+      const selectedTournament = managedTournaments.find((item) => item.id === tournamentId);
+      const tournamentName = (selectedTournament?.name || pricingName || "").trim();
       const res = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/access-code`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: tournamentName || null }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || res.statusText);
@@ -753,7 +817,6 @@ export default function HomePage() {
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     setAuthSession({ authenticated: false });
-    setManagedTournaments([]);
     setTournamentMessage("");
     setTournamentError("");
   }
@@ -769,7 +832,18 @@ export default function HomePage() {
       if (!res.ok) throw new Error(data?.error || res.statusText);
 
       const tournaments = (data.tournaments as ManagedTournament[]) || [];
-      setManagedTournaments(tournaments);
+      setManagedTournaments((prev) => {
+        const merged = [...prev];
+        tournaments.forEach((item) => {
+          const index = merged.findIndex((current) => current.id === item.id);
+          if (index >= 0) {
+            merged[index] = { ...merged[index], ...item };
+          } else {
+            merged.push(item);
+          }
+        });
+        return merged;
+      });
 
       if ((tournamentId === "demo-tournament" || !tournamentId) && tournaments[0]?.id) {
         setTournamentId(tournaments[0].id);
@@ -1113,7 +1187,9 @@ export default function HomePage() {
       プレイヤー名: getDisplayName(participant),
       枠: participant.venueFeeName || "",
       台番号: participant.adminNotes || "",
-      支払い: `totalTransaction=${participant.payment.totalTransaction}, totalOwed=${participant.payment.totalOwed}, totalPaid=${participant.payment.totalPaid ?? 0}`,
+      totalTransaction: participant.payment.totalTransaction ?? 0,
+      totalOwed: participant.payment.totalOwed ?? 0,
+      totalPaid: participant.payment.totalPaid ?? 0,
       チェックイン: participant.checkedIn ? "true" : "false",
       editNotes: participant.editNotes || "",
     }));
@@ -1948,6 +2024,7 @@ export default function HomePage() {
             </select>
           </div>
 
+          <div className="table-container">
           <table className="table">
             <thead>
               <tr>
@@ -2002,6 +2079,7 @@ export default function HomePage() {
               )}
             </tbody>
           </table>
+          </div>
             </>
           )}
         </div>
