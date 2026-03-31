@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
+import { ensureOperatorAccess } from "@/lib/operatorAccess";
 
 type AdjustmentOption = {
   key: string;
@@ -53,20 +53,12 @@ function normalizePricingConfig(input: any): PricingConfig {
   };
 }
 
-
-function ensureAuthenticated() {
-  const accessToken = cookies().get("startgg_access_token")?.value;
-  if (!accessToken) {
-    return NextResponse.json({ error: "start.gg に未ログインです" }, { status: 401 });
-  }
-  return null;
-}
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const unauthorized = ensureAuthenticated();
-  if (unauthorized) return unauthorized;
+  const access = await ensureOperatorAccess(request, params.tournamentId);
+  if (!access.ok) return access.response;
 
   try {
     const firestore = ensureFirestore();
@@ -89,8 +81,10 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const unauthorized = ensureAuthenticated();
-  if (unauthorized) return unauthorized;
+  const access = await ensureOperatorAccess(request, params.tournamentId);
+  if (!access.ok || !access.result.accessToken) {
+    return NextResponse.json({ error: "start.gg に未ログインです" }, { status: 401 });
+  }
 
   const body = await request.json().catch(() => null);
   if (!body) {
