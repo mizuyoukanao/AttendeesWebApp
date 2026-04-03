@@ -3,18 +3,17 @@ import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
 import { ensureOperatorAccess } from "@/lib/operatorAccess";
 
-function formatTimestampJst(date: Date) {
-  const offsetMs = 9 * 60 * 60 * 1000;
-  const local = new Date(date.getTime() + offsetMs);
-  const yyyy = local.getUTCFullYear();
-  const mm = `${local.getUTCMonth() + 1}`.padStart(2, "0");
-  const dd = `${local.getUTCDate()}`.padStart(2, "0");
-  const hh = `${local.getUTCHours()}`.padStart(2, "0");
-  const min = `${local.getUTCMinutes()}`.padStart(2, "0");
-  return `${yyyy}-${mm}-${dd} ${hh}:${min} JST`;
-}
-
 const GRAPHQL_URL = "https://api.start.gg/gql/alpha";
+
+function buildEditNote(reasonLabel: string, operatorUserId: string, requiresReason: boolean, deltaAmount: number) {
+  const label = reasonLabel.trim() || "変更なし";
+  const operator = operatorUserId.trim() || "operator";
+  if (requiresReason) {
+    const signedDelta = deltaAmount >= 0 ? `+${deltaAmount}` : `${deltaAmount}`;
+    return `${label} | ${signedDelta}円 | 受付: ${operator}`;
+  }
+  return `${label} | 受付: ${operator}`;
+}
 
 async function resolveOperatorUserId(accessToken: string, fallback: string) {
   try {
@@ -50,8 +49,9 @@ export async function PATCH(
   const resetCheckIn = Boolean(body.resetCheckIn);
   const checkedIn = typeof body.checkedIn === "boolean" ? body.checkedIn : undefined;
   const adminNotes = typeof body.adminNotes === "string" ? body.adminNotes.trim() : undefined;
-  const delta = Number(body.deltaAmount ?? 0);
   const reasonLabel = String(body.reasonLabel || "編集").trim();
+  const requiresReason = Boolean(body.requiresReason);
+  const deltaAmount = Number(body.deltaAmount ?? 0);
   const requestedUserId = String(body.operatorUserId || "operator").trim();
   const operatorUserId = access.result.accessToken
     ? await resolveOperatorUserId(access.result.accessToken, requestedUserId)
@@ -71,10 +71,9 @@ export async function PATCH(
     }
 
     const existing = snap.data() || {};
-    const now = new Date();
-    const timestamp = formatTimestampJst(now);
     const logPrefix = resetCheckIn ? "未チェックインへ戻す" : "枠・金額編集";
-    const noteEntry = `${timestamp} | ${logPrefix}: ${reasonLabel} | ${delta >= 0 ? `+${delta}` : delta}円`;
+    const label = `${logPrefix}: ${reasonLabel}`;
+    const noteEntry = buildEditNote(label, operatorUserId, requiresReason, deltaAmount);
 
     const payload: Record<string, unknown> = {
       checkedInBy: operatorUserId,

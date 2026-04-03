@@ -3,18 +3,17 @@ import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
 import { ensureOperatorAccess } from "@/lib/operatorAccess";
 
-function formatTimestampJst(date: Date) {
-  const offsetMs = 9 * 60 * 60 * 1000;
-  const local = new Date(date.getTime() + offsetMs);
-  const yyyy = local.getUTCFullYear();
-  const mm = `${local.getUTCMonth() + 1}`.padStart(2, "0");
-  const dd = `${local.getUTCDate()}`.padStart(2, "0");
-  const hh = `${local.getUTCHours()}`.padStart(2, "0");
-  const min = `${local.getUTCMinutes()}`.padStart(2, "0");
-  return `${yyyy}-${mm}-${dd} ${hh}:${min} JST`;
-}
-
 const GRAPHQL_URL = "https://api.start.gg/gql/alpha";
+
+function buildEditNote(reasonLabel: string, operatorUserId: string, requiresReason: boolean, deltaAmount: number) {
+  const label = reasonLabel.trim() || "変更なし";
+  const operator = operatorUserId.trim() || "operator";
+  if (requiresReason) {
+    const signedDelta = deltaAmount >= 0 ? `+${deltaAmount}` : `${deltaAmount}`;
+    return `${label} | ${signedDelta}円 | 受付: ${operator}`;
+  }
+  return `${label} | 受付: ${operator}`;
+}
 
 async function resolveOperatorUserId(accessToken: string, fallback: string) {
   try {
@@ -107,8 +106,9 @@ export async function POST(
     return NextResponse.json({ error: "リクエストボディが空です" }, { status: 400 });
   }
 
-  const delta = Number(body.deltaAmount ?? 0);
   const reasonLabel = String(body.reasonLabel || "").trim();
+  const requiresReason = Boolean(body.requiresReason);
+  const deltaAmount = Number(body.deltaAmount ?? 0);
   const requestedUserId = String(body.operatorUserId || "operator").trim();
   const operatorUserId = access.result.accessToken
     ? await resolveOperatorUserId(access.result.accessToken, requestedUserId)
@@ -116,10 +116,8 @@ export async function POST(
 
   try {
     const firestore = ensureFirestore();
-    const timestamp = new Date();
-    const noteEntry = delta !== 0 || reasonLabel
-      ? `${formatTimestampJst(timestamp)} | ${reasonLabel || "チェックイン"} | ${delta >= 0 ? `+${delta}` : delta}円`
-      : `${formatTimestampJst(timestamp)} | チェックイン | 0円`;
+    const label = reasonLabel || "チェックイン";
+    const noteEntry = buildEditNote(label, operatorUserId, requiresReason, deltaAmount);
     const tournamentRef = firestore.collection("tournaments").doc(params.tournamentId);
     const participantsCol = tournamentRef.collection("participants");
     const docRef = participantsCol.doc(params.participantId);
