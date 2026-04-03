@@ -14,7 +14,15 @@ export async function ensureOperatorAccess(request: NextRequest, tournamentId: s
   }
 
   const code = String(request.headers.get("x-tournament-access-code") || "").trim();
-  const operatorHandle = String(request.headers.get("x-operator-handle") || "").trim() || "code-operator";
+  const encodedOperatorHandle = String(request.headers.get("x-operator-handle") || "").trim();
+  let operatorHandle = "code-operator";
+  if (encodedOperatorHandle) {
+    try {
+      operatorHandle = decodeURIComponent(encodedOperatorHandle);
+    } catch {
+      operatorHandle = encodedOperatorHandle;
+    }
+  }
   if (!code) {
     return {
       ok: false as const,

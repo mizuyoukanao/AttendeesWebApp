@@ -206,12 +206,13 @@ function describeTournament(t: ManagedTournament) {
 
 function normalizeTournamentCache(input: unknown): ManagedTournament[] {
   if (!Array.isArray(input)) return [];
-  return input
+  const normalized = input
     .map((item: any) => ({
       id: String(item?.id || "").trim(),
       name: String(item?.name || "").trim(),
     }))
     .filter((item) => item.id);
+  return Array.from(new Map(normalized.map((item) => [item.id, item])).values());
 }
 
 function expandAlphabetRange(start: string, end: string): string[] {
@@ -409,15 +410,7 @@ export default function HomePage() {
       if (!cached) return;
       const parsed = normalizeTournamentCache(JSON.parse(cached));
       if (parsed.length > 0) {
-        setManagedTournaments((prev) => {
-          const merged = [...prev];
-          parsed.forEach((item) => {
-            if (!merged.some((current) => current.id === item.id)) {
-              merged.push(item);
-            }
-          });
-          return merged;
-        });
+        setManagedTournaments(parsed);
       }
     } catch {
       // ignore storage parse errors
@@ -425,9 +418,12 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
-    if (!managedTournaments.length) return;
-    const minimal = managedTournaments.map((item) => ({ id: item.id, name: item.name || "" }));
     try {
+      if (!managedTournaments.length) {
+        window.localStorage.removeItem(TOURNAMENT_CACHE_KEY);
+        return;
+      }
+      const minimal = managedTournaments.map((item) => ({ id: item.id, name: item.name || "" }));
       window.localStorage.setItem(TOURNAMENT_CACHE_KEY, JSON.stringify(minimal));
     } catch {
       // ignore storage write errors
@@ -699,7 +695,7 @@ export default function HomePage() {
     const headers: Record<string, string> = {};
     if (codeAccessSession.active) {
       headers["x-tournament-access-code"] = codeAccessSession.code;
-      headers["x-operator-handle"] = codeAccessSession.handleName || "code-operator";
+      headers["x-operator-handle"] = encodeURIComponent(codeAccessSession.handleName || "code-operator");
     }
     return headers;
   }
@@ -837,25 +833,16 @@ export default function HomePage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || res.statusText);
 
-      const tournaments = (data.tournaments as ManagedTournament[]) || [];
-      setManagedTournaments((prev) => {
-        const merged = [...prev];
-        tournaments.forEach((item) => {
-          const index = merged.findIndex((current) => current.id === item.id);
-          if (index >= 0) {
-            merged[index] = { ...merged[index], ...item };
-          } else {
-            merged.push(item);
-          }
-        });
-        return merged;
-      });
+      const tournaments = normalizeTournamentCache((data.tournaments as ManagedTournament[]) || []);
+      setManagedTournaments(tournaments);
 
-      if ((tournamentId === "demo-tournament" || !tournamentId) && tournaments[0]?.id) {
+      if (tournaments.length === 0) {
+        setTournamentId("demo-tournament");
+      } else if (!tournaments.some((item) => item.id === tournamentId) || tournamentId === "demo-tournament") {
         setTournamentId(tournaments[0].id);
-        if (tournaments[0].name) {
-          setPricingName((prev) => prev || tournaments[0].name || "");
-        }
+      }
+      if (tournaments[0]?.name) {
+        setPricingName((prev) => prev || tournaments[0].name || "");
       }
 
       setTournamentMessage(`${tournaments.length}件の大会を取得しました`);
@@ -969,6 +956,7 @@ export default function HomePage() {
             deltaAmount: delta,
             reasonLabel,
             operatorUserId: authSession.user?.id || codeAccessSession.handleName || "operator-demo",
+            requiresReason: Boolean(adjustmentOption?.requiresReason),
           }),
         },
       );
@@ -1014,6 +1002,7 @@ export default function HomePage() {
             resetCheckIn,
             checkedIn: editCheckedIn,
             operatorUserId: authSession.user?.id || codeAccessSession.handleName || "operator-demo",
+            requiresReason: Boolean(editAdjustmentOption?.requiresReason),
           }),
         },
       );
@@ -1173,7 +1162,15 @@ export default function HomePage() {
           .then(async (res) => {
             const data = await res.json();
             if (!res.ok) throw new Error(data?.error || res.statusText);
-            setOperatorMessage(`CSVをデータベースに保存しました（${data.count}件）`);
+            const deletedNames = Array.isArray(data?.deletedParticipants)
+              ? data.deletedParticipants
+                .map((item: any) => String(item?.playerName || item?.participantId || "").trim())
+                .filter(Boolean)
+              : [];
+            const deletedSummary = deletedNames.length > 0
+              ? ` / 削除: ${deletedNames.length}件（${deletedNames.join(", ")}）`
+              : "";
+            setOperatorMessage(`CSVをデータベースに保存しました（${data.count}件）${deletedSummary}`);
           })
           .catch((err) => setOperatorMessage(`CSV保存に失敗しました: ${err.message}`));
       },

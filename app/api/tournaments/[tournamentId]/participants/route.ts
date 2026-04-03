@@ -94,35 +94,52 @@ export async function POST(
   try {
     const firestore = ensureFirestore();
     const participantsCol = firestore.collection("tournaments").doc(params.tournamentId).collection("participants");
+    const existingSnapshot = await participantsCol.get();
+    const existingMap = new Map(existingSnapshot.docs.map((doc) => [doc.id, doc.data()]));
+    const uploadedIds = new Set(participants.map((participant) => participant.participantId));
 
     for (const participant of participants) {
       const docRef = participantsCol.doc(participant.participantId);
-      const existingSnap = await docRef.get();
-      const existing = existingSnap.exists ? existingSnap.data() : {};
-
-      const mergedCheckedIn = Boolean(existing?.checkedIn) || Boolean(participant.checkedIn);
+      const existing = existingMap.get(participant.participantId) || {};
+      const mergedCheckedIn = Boolean((existing as any)?.checkedIn) || Boolean(participant.checkedIn);
 
       await docRef.set(
         {
           participantId: participant.participantId,
           playerName: participant.playerName,
           adminNotes: participant.adminNotes ?? null,
-          venueFeeName: participant.venueFeeName ?? existing?.venueFeeName ?? null,
+          venueFeeName: participant.venueFeeName ?? (existing as any)?.venueFeeName ?? null,
           payment: {
             totalTransaction: participant.payment?.totalTransaction ?? 0,
             totalOwed: participant.payment?.totalOwed ?? 0,
             totalPaid: participant.payment?.totalPaid ?? 0,
           },
           checkedIn: mergedCheckedIn,
-          checkedInAt: mergedCheckedIn ? existing?.checkedInAt ?? FieldValue.serverTimestamp() : null,
-          editNotes: participant.editNotes ?? existing?.editNotes ?? "",
+          checkedInAt: mergedCheckedIn ? (existing as any)?.checkedInAt ?? FieldValue.serverTimestamp() : null,
+          editNotes: participant.editNotes ?? (existing as any)?.editNotes ?? "",
           updatedAt: FieldValue.serverTimestamp(),
         },
         { merge: true },
       );
     }
 
-    return NextResponse.json({ ok: true, count: participants.length });
+    const deletedParticipants: Array<{ participantId: string; playerName: string }> = [];
+    for (const existingDoc of existingSnapshot.docs) {
+      if (uploadedIds.has(existingDoc.id)) continue;
+      const data = existingDoc.data() || {};
+      await existingDoc.ref.delete();
+      deletedParticipants.push({
+        participantId: existingDoc.id,
+        playerName: String(data.playerName || existingDoc.id).trim() || existingDoc.id,
+      });
+    }
+
+    return NextResponse.json({
+      ok: true,
+      count: participants.length,
+      deletedCount: deletedParticipants.length,
+      deletedParticipants,
+    });
   } catch (error: any) {
     return NextResponse.json({ error: error?.message ?? "participants保存エラー" }, { status: 500 });
   }
