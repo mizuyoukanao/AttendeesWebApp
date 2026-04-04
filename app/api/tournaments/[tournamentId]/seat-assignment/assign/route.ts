@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
+import { getActorFromSession, requireTournamentAccess } from "@/lib/authz";
 
 type SeatPatternConfig = {
   venueFeeNames: string[];
@@ -9,14 +9,6 @@ type SeatPatternConfig = {
   exceptionPlayerNames: string[];
   reserveLabelPrefix: string;
 };
-
-function ensureAuthenticated() {
-  const accessToken = cookies().get("startgg_access_token")?.value;
-  if (!accessToken) {
-    return NextResponse.json({ error: "start.gg に未ログインです" }, { status: 401 });
-  }
-  return null;
-}
 
 function expandAlphabetRange(start: string, end: string): string[] {
   if (!start || !end) return [];
@@ -97,8 +89,8 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const unauthorized = ensureAuthenticated();
-  if (unauthorized) return unauthorized;
+  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg"]);
+  if (!authz.ok) return authz.response;
 
   const body = await request.json().catch(() => null);
   if (!body) {
@@ -112,41 +104,69 @@ export async function POST(
     return NextResponse.json({ error: "割り当て対象の枠が空です" }, { status: 400 });
   }
 
+  const firestore = ensureFirestore();
+  const tournamentRef = firestore.collection("tournaments").doc(params.tournamentId);
+  const participantsCol = tournamentRef.collection("participants");
+  const seatsCol = tournamentRef.collection("seats");
+  const lockRef = tournamentRef.collection("ops").doc("seat_assignment_lock");
+
+  const nowMs = Date.now();
+  const leaseMs = 2 * 60 * 1000;
+  const requestId = typeof body.requestId === "string" && body.requestId.trim()
+    ? body.requestId.trim().slice(0, 128)
+    : `${nowMs}-${Math.random().toString(36).slice(2, 8)}`;
+
   try {
-    const firestore = ensureFirestore();
-    const participantsCol = firestore.collection("tournaments").doc(params.tournamentId).collection("participants");
+    await firestore.runTransaction(async (tx) => {
+      const lockSnap = await tx.get(lockRef);
+      const leaseUntil = Number(lockSnap.data()?.leaseUntilMs ?? 0);
+      if (leaseUntil > nowMs) {
+        throw new Error("LOCKED");
+      }
+      tx.set(lockRef, {
+        leaseUntilMs: nowMs + leaseMs,
+        requestId,
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+    });
+
     const participantsSnap = await participantsCol.orderBy("participantId").get();
+    const seatsSnap = await seatsCol.get();
 
     const allParticipants = participantsSnap.docs.map((doc) => ({ id: doc.id, data: doc.data() }));
+    const seatMap = new Map(seatsSnap.docs.map((doc) => [doc.id, doc.data()]));
+
     const targets = allParticipants
-      .filter((p) => config.venueFeeNames.includes(String(p.data.venueFeeName || "").trim()))
-      .filter((p) => overwrite || !String(p.data.adminNotes || "").trim());
+      .filter((p) => config.venueFeeNames.includes(String(p.data.venueFeeName || "").trim()));
 
-    const targetIds = new Set(targets.map((p) => p.id));
-    const usedLabels = new Set(
-      allParticipants
-        .filter((p) => !targetIds.has(p.id))
-        .map((p) => String(p.data.adminNotes || "").trim())
-        .filter(Boolean),
-    );
-
-    const normalLabels = buildSeatLabels(config.pattern, targets.length);
+    const normalLabels = buildSeatLabels(config.pattern, Math.max(targets.length, 1));
     if (!normalLabels.length) {
       return NextResponse.json({ error: "台番号フォーマットから値を生成できませんでした" }, { status: 400 });
     }
 
-    let normalIndex = 0;
     const exceptionNames = new Set(config.exceptionPlayerNames);
-    const assignments: Array<{ participantId: string; label: string }> = [];
+
+    const usedLabels = new Set(
+      Array.from(seatMap.entries())
+        .filter(([, seat]) => String(seat?.assignedParticipantId || "").trim())
+        .map(([label]) => label),
+    );
+
+    const assignments: Array<{ participantId: string; label: string; assignmentType: "normal" | "reserve"; prevLabel: string }> = [];
+    let normalIndex = 0;
 
     for (const target of targets) {
-      let label = "";
-      if (!overwrite && String(target.data.adminNotes || "").trim()) {
+      const prevLabel = String(target.data.seatLabel || target.data.adminNotes || "").trim();
+      if (!overwrite && prevLabel) {
+        usedLabels.add(prevLabel);
         continue;
       }
 
+      let label = "";
+      let assignmentType: "normal" | "reserve" = "normal";
       if (exceptionNames.has(String(target.data.playerName || "").trim())) {
         label = nextReserveLabel(config.reserveLabelPrefix, usedLabels);
+        assignmentType = "reserve";
       } else {
         while (normalIndex < normalLabels.length && usedLabels.has(normalLabels[normalIndex])) {
           normalIndex += 1;
@@ -156,25 +176,82 @@ export async function POST(
           normalIndex += 1;
         } else {
           label = nextReserveLabel(config.reserveLabelPrefix, usedLabels);
+          assignmentType = "reserve";
         }
       }
 
       usedLabels.add(label);
-      assignments.push({ participantId: target.id, label });
+      assignments.push({ participantId: target.id, label, assignmentType, prevLabel });
     }
 
+    const actor = getActorFromSession(authz.session);
     const batch = firestore.batch();
-    assignments.forEach(({ participantId, label }) => {
-      const ref = participantsCol.doc(participantId);
-      batch.set(ref, {
+
+    assignments.forEach(({ participantId, label, assignmentType, prevLabel }) => {
+      const seatRef = seatsCol.doc(label);
+      batch.set(seatRef, {
+        seatLabel: label,
+        assignedParticipantId: participantId,
+        assignmentType,
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+
+      if (overwrite && prevLabel && prevLabel !== label) {
+        const prevSeatRef = seatsCol.doc(prevLabel);
+        batch.set(prevSeatRef, {
+          seatLabel: prevLabel,
+          assignedParticipantId: null,
+          updatedAt: FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
+
+      const participantRef = participantsCol.doc(participantId);
+      batch.set(participantRef, {
+        seatLabel: label,
         adminNotes: label,
         updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
+
+      const auditRef = participantRef.collection("auditLogs").doc();
+      batch.set(auditRef, {
+        type: "seat_assign",
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        actorDisplayName: actor.actorDisplayName,
+        reasonLabel: overwrite ? "bulk_assign_overwrite" : "bulk_assign",
+        before: {
+          seatLabel: prevLabel || null,
+          adminNotes: prevLabel || null,
+        },
+        after: {
+          seatLabel: label,
+          adminNotes: label,
+        },
+        requestId,
+        createdAt: FieldValue.serverTimestamp(),
+      });
     });
+
+    batch.set(lockRef, {
+      leaseUntilMs: 0,
+      releasedAt: FieldValue.serverTimestamp(),
+      requestId,
+    }, { merge: true });
+
     await batch.commit();
 
     return NextResponse.json({ ok: true, count: assignments.length, assignments });
   } catch (error: any) {
+    if (error?.message === "LOCKED") {
+      return NextResponse.json({ error: "座席割り当て処理が実行中です" }, { status: 409 });
+    }
+
+    try {
+      await lockRef.set({ leaseUntilMs: 0, releasedAt: FieldValue.serverTimestamp(), requestId }, { merge: true });
+    } catch {
+      // noop
+    }
+
     return NextResponse.json({ error: error?.message ?? "一括台番号割り当てエラー" }, { status: 500 });
   }
 }

@@ -1,61 +1,68 @@
 # AttendeesWebApp
 
-start.gg 連携のチェックインページと運営ダッシュボードの Next.js デモです。
+start.gg 連携のチェックインページと運営ダッシュボードの Next.js アプリです。
 
-## セットアップ
+## セットアップ（ローカル）
 
 1. 依存関係インストール
    ```bash
    npm install
    ```
+
 2. 環境変数を `.env.local` に設定
    ```env
-   SGGCID=your_client_id
-   SGGCS=your_client_secret
-   # start.gg に登録した Redirect URI（例: http://localhost:3000/api/auth/callback）
-   STARTGG_REDIRECT_URI=http://localhost:3000/api/auth/callback
-   # 必要に応じて scope を上書き（デフォルト: "identity tournaments:read"）
+   APP_SESSION_SECRET=your_strong_random_secret
+   SGGCID=your_startgg_client_id
+   SGGCS=your_startgg_client_secret
    SGGOASCP=identity tournaments:read
+   STARTGG_REDIRECT_URI=http://localhost:3000/api/auth/callback
+   NEXT_PUBLIC_BASE_URL=http://localhost:3000
+   ```
 
-   # Firestore（サービスアカウント）
-   PID_SECRET=your_project_id
-   CLIENT_EMAIL_SECRET=service-account@your_project_id.iam.gserviceaccount.com
-   # JSON の private_key をそのまま貼る。改行は \n に置換
-   PRI_KEY=-----BEGIN PRIVATE KEY-----\nXXXX\n-----END PRIVATE KEY-----\n
-   # Firestore クライアント（リアルタイム購読用 / NEXT_PUBLIC_ 前提）
-   NEXT_PUBLIC_FIREBASE_API_KEY=your_web_api_key
-   NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=your_project_id.firebaseapp.com
-   NEXT_PUBLIC_FIREBASE_PROJECT_ID=your_project_id
-  ```
-3. 開発サーバー起動
+3. Firestore 用の Application Default Credentials を設定（どちらか）
+   - `gcloud auth application-default login`
+   - または `GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json`
+
+4. 開発サーバー起動
    ```bash
    npm run dev
    ```
-4. `http://localhost:3000` でアクセスできます。
 
-## 主要機能
-- html5-qrcode を使った QR スキャンと participantId の抽出
-- 支払判定（Total Transaction / Total Owed、学割 1000円、差額調整）
-- Firestore 上の大会単位 pricingConfig（general/bring/student/差額オプション）保存・取得
-- CSV アップロード時のホワイトリスト取り込み（Id, GamerTag/Short GamerTag, Admin Notes, Checked In, Total Owed, Total Paid, Total Transaction）
-- 参加者コレクションを Firestore に保存し、他端末でもリアルタイム購読できるようにしたダッシュボード＆キオスク
-- チェックイン時の editNotes 追記（JST タイムスタンプ + 理由 + 増減額）
-- 簡易ダッシュボードでの検索・フィルタ表示
-- start.gg OAuth2 Authorization Code Flow 実装（/api/auth/login → /api/auth/callback でアクセストークン交換、currentUser 取得、Cookie 保存）
+---
 
-## Firestore 設定手順
-1. Firebase コンソールで Firestore を「ネイティブモード」で有効化し、プロジェクトIDを控える。
-2. IAMと管理 > サービスアカウントで新規キー（JSON）を発行し、以下の値を `.env.local` に設定する。
-   - `project_id` → `PID_SECRET`
-   - `client_email` → `CLIENT_EMAIL_SECRET`
-   - `private_key` → `PRI_KEY`（改行を `\n` に置換）
-3. セキュリティルールで適切な read/write 権限を設定し、Cloud Functions/Next.js のホストと同じサービスアカウントでアクセスできるようにする。
-4. 料金設定保存 API は `tournaments/{tournamentId}` ドキュメントに `pricingConfig` フィールドを `merge` で書き込みます（`updatedAt` は serverTimestamp）。
-5. 参加者データは `tournaments/{tournamentId}/participants/{participantId}` に保存します。クライアントは Web SDK（NEXT_PUBLIC_FIREBASE_* の設定）で onSnapshot によるリアルタイム購読を行い、サーバー経由の POST/チェックイン更新が他端末にも同期されます。
+## 本番（Firebase App Hosting + Secret Manager）
 
-## Firestore API エンドポイント
-- `GET /api/tournaments/{tournamentId}/pricing` : Firestore から pricingConfig を取得（存在しない場合はデフォルト値を返却）。
-- `POST /api/tournaments/{tournamentId}/pricing` : pricingConfig を Firestore に保存（`name` も任意で保存）。
-- `GET /api/tournaments/{tournamentId}/participants` : Firestore の参加者コレクションを一覧取得。
-- `POST /api/tournaments/{tournamentId}/participants` : CSV などから抽出した参加者配列をホワイトリスト項目で upsert（checkedIn=true は維持）。
-- `POST /api/tournaments/{tournamentId}/participants/{participantId}/checkin` : チェックイン確定と editNotes 追記（サーバー時刻で JST 文字列を付与）。
+必須環境変数（Secret Manager 含む）:
+- `APP_SESSION_SECRET`（Secret）
+- `SGGCS`（Secret）
+- `SGGCID`
+- `SGGOASCP`
+- `STARTGG_REDIRECT_URI`
+- `NEXT_PUBLIC_BASE_URL`
+
+`apphosting.yaml` サンプルはリポジトリの `apphosting.yaml` を参照してください。
+
+---
+
+## 運用方針
+
+- Firestore はクライアントから直接読まず、サーバー（Admin SDK）経由のみでアクセスします。
+- リアルタイム参加者一覧は SSE (`/api/tournaments/{tournamentId}/participants/stream`) で配信します。
+- 認証状態の真実源は署名付き `app_session` Cookie です。
+- access code は平文保存せず、`codeHash` のみを保存・照合します。
+- CSV import は未掲載参加者を即時削除せず、欠落候補としてマークします。
+- 座席の真実源は `tournaments/{tournamentId}/seats/{seatLabel}` です。
+- Firestore Rules は **Firebase / GCP コンソールから手動設定**してください（このリポジトリでは rules ファイル配布・deploy 手順は扱いません）。
+
+---
+
+## 主要API
+
+- `GET /api/auth/session`
+- `POST /api/operator/session`
+- `GET /api/tournaments/{tournamentId}/participants`
+- `GET /api/tournaments/{tournamentId}/participants/stream`
+- `POST /api/tournaments/{tournamentId}/participants`
+- `POST /api/tournaments/{tournamentId}/participants/{participantId}/checkin`
+- `PATCH /api/tournaments/{tournamentId}/participants/{participantId}`
+- `POST /api/tournaments/{tournamentId}/seat-assignment/assign`

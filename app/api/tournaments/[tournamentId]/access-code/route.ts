@@ -1,33 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
+import { requireTournamentAccess } from "@/lib/authz";
+import { generateAccessCode, hashAccessCode, maskCode, normalizeAccessCode, timingSafeEqualHex } from "@/lib/accessCode";
 
 type StoredAccessCode = {
-  code: string;
+  codeHash: string;
+  maskedCode: string;
+  name: string;
   status: "active" | "disabled" | "deleted";
   createdAt: string;
-  updatedAt: string;
+  lastUsedAt: string;
 };
-
-function ensureAuthenticated() {
-  const accessToken = cookies().get("startgg_access_token")?.value;
-  if (!accessToken) {
-    return NextResponse.json({ error: "start.gg に未ログインです" }, { status: 401 });
-  }
-  return null;
-}
-
-function generateAccessCode() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const block = () => Array.from({ length: 5 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
-  return `${block()}-${block()}-${block()}`;
-}
 
 async function generateUniqueAccessCode(firestore: ReturnType<typeof ensureFirestore>) {
   for (let i = 0; i < 30; i += 1) {
     const candidate = generateAccessCode();
-    const snap = await firestore.collection("operatorAccessCodes").doc(candidate).get();
+    const candidateHash = hashAccessCode(candidate);
+    const snap = await firestore.collection("operatorAccessCodes").doc(candidateHash).get();
     if (!snap.exists) return candidate;
   }
   throw new Error("コード生成に失敗しました");
@@ -37,37 +27,34 @@ function normalizeCodes(raw: any): StoredAccessCode[] {
   if (!Array.isArray(raw)) return [];
   return raw
     .map((item) => ({
-      code: String(item?.code || "").trim(),
+      codeHash: String(item?.codeHash || "").trim(),
+      maskedCode: String(item?.maskedCode || "").trim(),
+      name: String(item?.name || "").trim(),
       status: item?.status === "disabled" || item?.status === "deleted" ? item.status : "active",
       createdAt: String(item?.createdAt || ""),
-      updatedAt: String(item?.updatedAt || item?.createdAt || ""),
+      lastUsedAt: String(item?.lastUsedAt || item?.createdAt || ""),
     }))
-    .filter((item) => item.code);
+    .filter((item) => item.codeHash);
 }
 
 export async function GET(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const code = request.nextUrl.searchParams.get("code");
+  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg"]);
+  if (!authz.ok) return authz.response;
 
   try {
     const firestore = ensureFirestore();
     const snap = await firestore.collection("tournaments").doc(params.tournamentId).get();
     const data = snap.data() || {};
-    const codes = normalizeCodes(data.operatorAccessCodeHistory);
-    const activeCode = codes.find((entry) => entry.status === "active")?.code
-      || String(data.operatorAccessCode || "").trim();
+    const history = normalizeCodes(data.operatorAccessCodeHistory);
 
-    if (code) {
-      const matched = codes.find((entry) => entry.code === code.trim());
-      const valid = matched ? matched.status === "active" : Boolean(activeCode && activeCode === code.trim());
-      return NextResponse.json({ valid, tournamentName: data?.name || null });
-    }
-
-    const unauthorized = ensureAuthenticated();
-    if (unauthorized) return unauthorized;
-    return NextResponse.json({ accessCode: activeCode || null, history: codes });
+    return NextResponse.json({
+      accessCode: null,
+      history,
+      activeCodeHash: String(data.operatorAccessCodeHash || "") || null,
+    });
   } catch (error: any) {
     return NextResponse.json({ error: error?.message ?? "大会コード取得エラー" }, { status: 500 });
   }
@@ -77,54 +64,65 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const unauthorized = ensureAuthenticated();
-  if (unauthorized) return unauthorized;
+  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg"]);
+  if (!authz.ok) return authz.response;
   const body = await request.json().catch(() => null);
-  const tournamentName = typeof body?.name === "string" ? body.name.trim() : "";
+  const tournamentName = normalizeAccessCode(String(body?.name || ""));
 
   try {
     const firestore = ensureFirestore();
     const code = await generateUniqueAccessCode(firestore);
+    const codeHash = hashAccessCode(code);
+    const maskedCode = maskCode(code);
     const now = new Date().toISOString();
     const ref = firestore.collection("tournaments").doc(params.tournamentId);
+
     await firestore.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
       const data = snap.data() || {};
-      const previousActiveCodes: string[] = [];
+      const previousActiveHashes: string[] = [];
       const codes = normalizeCodes(data.operatorAccessCodeHistory).map((item) => {
         if (item.status === "active") {
-          previousActiveCodes.push(item.code);
-          return { ...item, status: "disabled" as const, updatedAt: now };
+          previousActiveHashes.push(item.codeHash);
+          return { ...item, status: "disabled" as const, lastUsedAt: now };
         }
         return item;
       });
+
       codes.unshift({
-        code,
+        codeHash,
+        maskedCode,
+        name: tournamentName || String(data?.name || "").trim(),
         status: "active",
         createdAt: now,
-        updatedAt: now,
+        lastUsedAt: now,
       });
+
       tx.set(ref, {
-        operatorAccessCode: code,
+        operatorAccessCodeHash: codeHash,
         operatorAccessCodeHistory: codes,
-        name: tournamentName || data?.name || null,
         updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
-      previousActiveCodes.forEach((previousCode) => {
-        tx.set(firestore.collection("operatorAccessCodes").doc(previousCode), {
+
+      previousActiveHashes.forEach((hash) => {
+        tx.set(firestore.collection("operatorAccessCodes").doc(hash), {
           status: "disabled",
+          lastUsedAt: now,
           updatedAt: now,
         }, { merge: true });
       });
-      tx.set(firestore.collection("operatorAccessCodes").doc(code), {
+
+      tx.set(firestore.collection("operatorAccessCodes").doc(codeHash), {
+        codeHash,
         tournamentId: params.tournamentId,
-        tournamentName: tournamentName || data?.name || null,
         status: "active",
         createdAt: now,
+        lastUsedAt: now,
         updatedAt: now,
       });
     });
-    return NextResponse.json({ ok: true, accessCode: code });
+
+    return NextResponse.json({ ok: true, accessCode: code, codeHash, maskedCode });
   } catch (error: any) {
     return NextResponse.json({ error: error?.message ?? "大会コード発行エラー" }, { status: 500 });
   }
@@ -134,14 +132,14 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const unauthorized = ensureAuthenticated();
-  if (unauthorized) return unauthorized;
+  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg"]);
+  if (!authz.ok) return authz.response;
 
   const body = await request.json().catch(() => null);
   const action = String(body?.action || "").trim();
-  const targetCode = String(body?.code || "").trim();
-  if (!action || !targetCode) {
-    return NextResponse.json({ error: "action と code が必要です" }, { status: 400 });
+  const targetCodeHash = String(body?.codeHash || "").trim();
+  if (!action || !targetCodeHash) {
+    return NextResponse.json({ error: "action と codeHash が必要です" }, { status: 400 });
   }
 
   try {
@@ -153,43 +151,64 @@ export async function PATCH(
       const snap = await tx.get(ref);
       const data = snap.data() || {};
       const codes = normalizeCodes(data.operatorAccessCodeHistory);
-      const idx = codes.findIndex((item) => item.code === targetCode);
+      const idx = codes.findIndex((item) => timingSafeEqualHex(item.codeHash, targetCodeHash));
       if (idx < 0) throw new Error("NOT_FOUND");
 
       if (action === "disable") {
-        codes[idx] = { ...codes[idx], status: "disabled", updatedAt: now };
+        codes[idx] = { ...codes[idx], status: "disabled", lastUsedAt: now };
       } else if (action === "delete") {
-        codes[idx] = { ...codes[idx], status: "deleted", updatedAt: now };
+        codes[idx] = { ...codes[idx], status: "deleted", lastUsedAt: now };
       } else if (action === "activate") {
+        const codeRef = firestore.collection("operatorAccessCodes");
+        const activeCodesQuery = codeRef
+          .where("tournamentId", "==", params.tournamentId)
+          .where("status", "==", "active");
+        const activeCodesSnap = await tx.get(activeCodesQuery);
+        const previousActiveHashes = activeCodesSnap.docs
+          .map((doc) => String(doc.id || "").trim())
+          .filter((hash) => hash && !timingSafeEqualHex(hash, targetCodeHash));
+
         for (let i = 0; i < codes.length; i += 1) {
-          if (codes[i].status === "active") codes[i] = { ...codes[i], status: "disabled", updatedAt: now };
+          if (codes[i].status === "active") codes[i] = { ...codes[i], status: "disabled", lastUsedAt: now };
         }
-        codes[idx] = { ...codes[idx], status: "active", updatedAt: now };
+        codes[idx] = { ...codes[idx], status: "active", lastUsedAt: now };
+
+        previousActiveHashes.forEach((hash) => {
+          tx.set(codeRef.doc(hash), {
+            codeHash: hash,
+            tournamentId: params.tournamentId,
+            status: "disabled",
+            lastUsedAt: now,
+            updatedAt: now,
+          }, { merge: true });
+        });
+
+        tx.set(codeRef.doc(targetCodeHash), {
+          codeHash: targetCodeHash,
+          tournamentId: params.tournamentId,
+          status: "active",
+          lastUsedAt: now,
+          updatedAt: now,
+        }, { merge: true });
       } else {
         throw new Error("BAD_ACTION");
       }
 
-      const activeCode = codes.find((item) => item.status === "active")?.code || null;
+      const activeCodeHash = codes.find((item) => item.status === "active")?.codeHash || null;
       tx.set(ref, {
-        operatorAccessCode: activeCode,
+        operatorAccessCodeHash: activeCodeHash,
         operatorAccessCodeHistory: codes,
         updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
-      tx.set(firestore.collection("operatorAccessCodes").doc(targetCode), {
-        status: codes[idx].status,
-        tournamentId: params.tournamentId,
-        updatedAt: now,
-      }, { merge: true });
-      if (action === "activate") {
-        codes.forEach((item) => {
-          if (item.code !== targetCode && item.status === "disabled") {
-            tx.set(firestore.collection("operatorAccessCodes").doc(item.code), {
-              status: "disabled",
-              tournamentId: params.tournamentId,
-              updatedAt: now,
-            }, { merge: true });
-          }
-        });
+
+      if (action !== "activate") {
+        tx.set(firestore.collection("operatorAccessCodes").doc(targetCodeHash), {
+          codeHash: targetCodeHash,
+          status: codes[idx].status,
+          tournamentId: params.tournamentId,
+          lastUsedAt: now,
+          updatedAt: now,
+        }, { merge: true });
       }
     });
 

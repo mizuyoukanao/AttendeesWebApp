@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
-import { ensureOperatorAccess } from "@/lib/operatorAccess";
+import { requireTournamentAccess } from "@/lib/authz";
 
 type AdjustmentOption = {
   key: string;
@@ -57,8 +57,8 @@ export async function GET(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const access = await ensureOperatorAccess(request, params.tournamentId);
-  if (!access.ok) return access.response;
+  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg", "operator_code"]);
+  if (!authz.ok) return authz.response;
 
   try {
     const firestore = ensureFirestore();
@@ -81,10 +81,8 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const access = await ensureOperatorAccess(request, params.tournamentId);
-  if (!access.ok || !access.result.accessToken) {
-    return NextResponse.json({ error: "start.gg に未ログインです" }, { status: 401 });
-  }
+  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg"]);
+  if (!authz.ok) return authz.response;
 
   const body = await request.json().catch(() => null);
   if (!body) {
