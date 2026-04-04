@@ -1,6 +1,6 @@
 # AttendeesWebApp
 
-start.gg 連携のチェックインページと運営ダッシュボードの Next.js デモです。
+start.gg 連携のチェックインページと運営ダッシュボードの Next.js アプリです。
 
 ## セットアップ
 
@@ -12,50 +12,80 @@ start.gg 連携のチェックインページと運営ダッシュボードの N
    ```env
    SGGCID=your_client_id
    SGGCS=your_client_secret
-   # start.gg に登録した Redirect URI（例: http://localhost:3000/api/auth/callback）
    STARTGG_REDIRECT_URI=http://localhost:3000/api/auth/callback
-   # 必要に応じて scope を上書き（デフォルト: "identity tournaments:read"）
    SGGOASCP=identity tournaments:read
 
-   # Firestore（サービスアカウント）
+   # 署名付きアプリセッション
+   APP_SESSION_SECRET=your_strong_random_secret
+
+   # Firestore（サービスアカウント / サーバー専用アクセス）
    PID_SECRET=your_project_id
    CLIENT_EMAIL_SECRET=service-account@your_project_id.iam.gserviceaccount.com
-   # JSON の private_key をそのまま貼る。改行は \n に置換
    PRI_KEY=-----BEGIN PRIVATE KEY-----\nXXXX\n-----END PRIVATE KEY-----\n
-   # Firestore クライアント（リアルタイム購読用 / NEXT_PUBLIC_ 前提）
-   NEXT_PUBLIC_FIREBASE_API_KEY=your_web_api_key
-   NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=your_project_id.firebaseapp.com
-   NEXT_PUBLIC_FIREBASE_PROJECT_ID=your_project_id
-  ```
+   # 任意: 共有URL QR生成
+   NEXT_PUBLIC_BASE_URL=http://localhost:3000
+   ```
 3. 開発サーバー起動
    ```bash
    npm run dev
    ```
-4. `http://localhost:3000` でアクセスできます。
+4. `http://localhost:3000` にアクセス
 
-## 主要機能
-- html5-qrcode を使った QR スキャンと participantId の抽出
-- 支払判定（Total Transaction / Total Owed、学割 1000円、差額調整）
-- Firestore 上の大会単位 pricingConfig（general/bring/student/差額オプション）保存・取得
-- CSV アップロード時のホワイトリスト取り込み（Id, GamerTag/Short GamerTag, Admin Notes, Checked In, Total Owed, Total Paid, Total Transaction）
-- 参加者コレクションを Firestore に保存し、他端末でもリアルタイム購読できるようにしたダッシュボード＆キオスク
-- チェックイン時の editNotes 追記（JST タイムスタンプ + 理由 + 増減額）
-- 簡易ダッシュボードでの検索・フィルタ表示
-- start.gg OAuth2 Authorization Code Flow 実装（/api/auth/login → /api/auth/callback でアクセストークン交換、currentUser 取得、Cookie 保存）
+---
 
-## Firestore 設定手順
-1. Firebase コンソールで Firestore を「ネイティブモード」で有効化し、プロジェクトIDを控える。
-2. IAMと管理 > サービスアカウントで新規キー（JSON）を発行し、以下の値を `.env.local` に設定する。
-   - `project_id` → `PID_SECRET`
-   - `client_email` → `CLIENT_EMAIL_SECRET`
-   - `private_key` → `PRI_KEY`（改行を `\n` に置換）
-3. セキュリティルールで適切な read/write 権限を設定し、Cloud Functions/Next.js のホストと同じサービスアカウントでアクセスできるようにする。
-4. 料金設定保存 API は `tournaments/{tournamentId}` ドキュメントに `pricingConfig` フィールドを `merge` で書き込みます（`updatedAt` は serverTimestamp）。
-5. 参加者データは `tournaments/{tournamentId}/participants/{participantId}` に保存します。クライアントは Web SDK（NEXT_PUBLIC_FIREBASE_* の設定）で onSnapshot によるリアルタイム購読を行い、サーバー経由の POST/チェックイン更新が他端末にも同期されます。
+## 運用方針（Step7反映）
 
-## Firestore API エンドポイント
-- `GET /api/tournaments/{tournamentId}/pricing` : Firestore から pricingConfig を取得（存在しない場合はデフォルト値を返却）。
-- `POST /api/tournaments/{tournamentId}/pricing` : pricingConfig を Firestore に保存（`name` も任意で保存）。
-- `GET /api/tournaments/{tournamentId}/participants` : Firestore の参加者コレクションを一覧取得。
-- `POST /api/tournaments/{tournamentId}/participants` : CSV などから抽出した参加者配列をホワイトリスト項目で upsert（checkedIn=true は維持）。
-- `POST /api/tournaments/{tournamentId}/participants/{participantId}/checkin` : チェックイン確定と editNotes 追記（サーバー時刻で JST 文字列を付与）。
+### 1) Firestore はクライアントから直接読まない
+- クライアントは Firestore Web SDK を使いません。
+- Firestore への read/write は **Next.js Route Handler + Firebase Admin SDK** のみで行います。
+
+### 2) Firestore Rules は deny-all
+- このアプリはサーバー専用アクセス前提です。
+- Firestore Security Rules は次の deny-all を適用してください。
+
+```txt
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+```
+
+### 3) リアルタイム一覧は SSE 経由
+- 参加者一覧のリアルタイム更新は `onSnapshot` ではなく SSE を使います。
+- エンドポイント: `GET /api/tournaments/{tournamentId}/participants/stream`
+- クライアントは `EventSource` で購読し、切断時は再接続 + 通常GETへフォールバックします。
+
+### 4) start.gg 管理者セッションと operator code セッションの違い
+- start.gg ログイン後は、管理権限のある大会IDのみを `app_session` に保持してアクセスを許可します。
+- operator code ログインは `POST /api/operator/session` で短命の operator セッションを発行します。
+- API は共通の認可関数でモード（startgg / operator_code）ごとの許可を判定します。
+
+### 5) access code はハッシュ保存
+- Firestore には平文コードを保存しません。
+- `operatorAccessCodeHash` / `operatorAccessCodes/{codeHash}` で管理し、照合は timing-safe 比較で行います。
+- 平文は発行時レスポンスで一度だけ表示します（履歴表示は maskedCode）。
+
+### 6) CSV import は即 delete しない
+- CSV 取込で未掲載参加者を即削除しません。
+- `importState.seenInLatestImport=false` で欠落候補としてマークします。
+- 既存の `checkedIn` / `checkedInAt` / `checkedInBy` / `seatLabel` は preserve します。
+
+### 7) seats コレクションが seat の真実源
+- 座席状態は `tournaments/{tournamentId}/seats/{seatLabel}` を真実源として管理します。
+- チェックイン自動割当・一括割当とも seats を更新し、participant 側 `seatLabel`/`adminNotes` は同期される従属データです。
+
+---
+
+## 主要API
+- `GET /api/auth/session` : 署名付きアプリセッション状態を返却
+- `POST /api/operator/session` : 大会コードで operator セッションを発行
+- `GET /api/tournaments/{tournamentId}/participants` : 参加者一覧（フォールバック取得）
+- `GET /api/tournaments/{tournamentId}/participants/stream` : 参加者 SSE ストリーム
+- `POST /api/tournaments/{tournamentId}/participants` : CSV upsert（欠落はマークのみ）
+- `POST /api/tournaments/{tournamentId}/participants/{participantId}/checkin` : チェックイン + 監査ログ追加
+- `PATCH /api/tournaments/{tournamentId}/participants/{participantId}` : 参加者編集 + 監査ログ追加
+- `POST /api/tournaments/{tournamentId}/seat-assignment/assign` : lock付き一括座席割当

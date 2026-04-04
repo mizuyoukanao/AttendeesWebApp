@@ -1,11 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { collection, onSnapshot, orderBy, query, Unsubscribe } from "firebase/firestore";
 import { Html5QrcodeScanner } from "html5-qrcode";
 import clsx from "clsx";
 import Papa from "papaparse";
-import { ensureFirestoreClient } from "@/lib/firebaseClient";
 
 type AdjustmentOption = {
   key: string;
@@ -97,12 +95,13 @@ type AuthSession = {
 
 type CodeAccessSession = {
   active: boolean;
-  code: string;
   handleName: string;
+  tournamentId?: string;
 };
 
 type AccessCodeRecord = {
-  code: string;
+  codeHash: string;
+  maskedCode?: string;
   status: "active" | "disabled" | "deleted";
   createdAt: string;
   updatedAt: string;
@@ -312,7 +311,7 @@ export default function HomePage() {
   const scannerContainerRef = useRef<HTMLDivElement>(null);
   const lostFoundScannerContainerRef = useRef<HTMLDivElement>(null);
   const [authSession, setAuthSession] = useState<AuthSession>({ authenticated: false });
-  const [codeAccessSession, setCodeAccessSession] = useState<CodeAccessSession>({ active: false, code: "", handleName: "" });
+  const [codeAccessSession, setCodeAccessSession] = useState<CodeAccessSession>({ active: false, handleName: "" });
   const [accessCodeInput, setAccessCodeInput] = useState("");
   const [accessHandleInput, setAccessHandleInput] = useState("");
   const [accessOverlayOpen, setAccessOverlayOpen] = useState(true);
@@ -329,7 +328,7 @@ export default function HomePage() {
   const [isMobileViewport, setIsMobileViewport] = useState(false);
   const compactKiosk = isMobileViewport;
   const hasOperatorAccess = authSession.authenticated || codeAccessSession.active;
-  const activeAccessCode = accessCodeHistory.find((item) => item.status === "active")?.code || issuedAccessCode;
+  const activeAccessCode = issuedAccessCode;
   const shareUrl = typeof window !== "undefined" && activeAccessCode
     ? `${window.location.origin}${window.location.pathname}?tournamentId=${encodeURIComponent(tournamentId)}&code=${encodeURIComponent(activeAccessCode)}`
     : "";
@@ -479,64 +478,76 @@ export default function HomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tournamentId, authSession.authenticated, hasOperatorAccess]);
 
+  async function fetchParticipantsSnapshot(targetTournamentId: string) {
+    const res = await fetch(`/api/tournaments/${encodeURIComponent(targetTournamentId)}/participants`, {
+      credentials: "include",
+      cache: "no-store",
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error || res.statusText);
+    const next = Array.isArray(data?.participants) ? data.participants : [];
+    setParticipants(next as Participant[]);
+    setFirestoreReady(true);
+  }
+
   useEffect(() => {
-    let unsubscribe: Unsubscribe | null = null;
     setFirestoreError("");
     setFirestoreReady(false);
 
-    if (!tournamentId) {
+    if (!tournamentId || !hasOperatorAccess) {
       setParticipants([]);
       return () => undefined;
     }
 
-    const connect = async () => {
-      try {
-        const db = ensureFirestoreClient();
-        const q = query(
-          collection(db, "tournaments", tournamentId, "participants"),
-          orderBy("participantId"),
-        );
+    let closed = false;
+    const streamUrl = `/api/tournaments/${encodeURIComponent(tournamentId)}/participants/stream`;
+    const source = new EventSource(streamUrl, { withCredentials: true });
 
-        unsubscribe = onSnapshot(
-          q,
-          (snapshot) => {
-            const data = snapshot.docs.map((doc) => {
-              const d = doc.data() as any;
-              const checkedInAt = d.checkedInAt?.toDate ? d.checkedInAt.toDate().toISOString() : d.checkedInAt;
-              return {
-                participantId: doc.id,
-                playerName: d.playerName || doc.id,
-                adminNotes: d.adminNotes || "",
-                venueFeeName: d.venueFeeName || "",
-                payment: {
-                  totalTransaction: d?.payment?.totalTransaction ?? 0,
-                  totalOwed: d?.payment?.totalOwed ?? 0,
-                  totalPaid: d?.payment?.totalPaid ?? 0,
-                },
-                checkedIn: Boolean(d.checkedIn),
-                checkedInAt: checkedInAt || undefined,
-                checkedInBy: d.checkedInBy || undefined,
-                editNotes: d.editNotes || "",
-              } as Participant;
-            });
-            setParticipants(data);
-            setFirestoreReady(true);
-          },
-          (error) => {
-            setFirestoreError(`データベース取得に失敗しました: ${error.message}`);
-          },
-        );
-      } catch (error: any) {
-        setFirestoreError(error?.message || "データベースの処理に失敗しました");
+    const applyPayload = (payload: any) => {
+      const next = Array.isArray(payload?.participants) ? payload.participants : [];
+      setParticipants(next as Participant[]);
+      setFirestoreReady(true);
+      setFirestoreError("");
+    };
+
+    const onSnapshotEvent = (event: MessageEvent) => {
+      try {
+        applyPayload(JSON.parse(event.data));
+      } catch {
+        setFirestoreError("参加者データの受信に失敗しました");
       }
     };
 
-    connect();
+    const onUpdateEvent = (event: MessageEvent) => {
+      try {
+        applyPayload(JSON.parse(event.data));
+      } catch {
+        setFirestoreError("参加者更新の反映に失敗しました");
+      }
+    };
+
+    source.addEventListener("snapshot", onSnapshotEvent);
+    source.addEventListener("update", onUpdateEvent);
+
+    source.onerror = async () => {
+      if (closed) return;
+      setFirestoreError("リアルタイム接続が不安定です。通常取得にフォールバックします。");
+      try {
+        await fetchParticipantsSnapshot(tournamentId);
+      } catch (error: any) {
+        if (!closed) {
+          setFirestoreError(`参加者取得に失敗しました: ${error?.message || "unknown"}`);
+        }
+      }
+    };
 
     return () => {
-      if (unsubscribe) unsubscribe();
+      closed = true;
+      source.removeEventListener("snapshot", onSnapshotEvent);
+      source.removeEventListener("update", onUpdateEvent);
+      source.close();
     };
-  }, [tournamentId]);
+  }, [tournamentId, hasOperatorAccess]);
 
   useEffect(() => {
     const exists = pricingConfig.adjustmentOptions.some((opt) => opt.key === selectedAdjustment);
@@ -552,10 +563,7 @@ export default function HomePage() {
   async function loadPricingConfig(targetId: string) {
     setPricingMessage(`料金設定(${targetId})を取得中...`);
     try {
-      const headers = buildOperatorHeaders();
-      const res = await fetch(`/api/tournaments/${encodeURIComponent(targetId)}/pricing`, {
-        headers,
-      });
+      const res = await fetch(`/api/tournaments/${encodeURIComponent(targetId)}/pricing`);
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || res.statusText);
       const config = (data.pricingConfig as PricingConfig) || defaultPricingConfig;
@@ -681,24 +689,21 @@ export default function HomePage() {
 
   async function refreshSession() {
     try {
-      const res = await fetch("/api/auth/session");
-      if (!res.ok) throw new Error(await res.text());
-      const data = (await res.json()) as AuthSession;
-      setAuthSession(data);
+      const res = await fetch("/api/auth/session", { credentials: "include", cache: "no-store" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setAuthSession({ authenticated: false });
+        setAuthError(data?.error ? `認証エラー: ${data.error}` : "未認証です");
+        return;
+      }
+      setAuthSession(data as AuthSession);
       setAuthError("");
     } catch (error: any) {
+      setAuthSession({ authenticated: false });
       setAuthError("認証状態の取得に失敗しました: " + (error?.message ?? ""));
     }
   }
 
-  function buildOperatorHeaders() {
-    const headers: Record<string, string> = {};
-    if (codeAccessSession.active) {
-      headers["x-tournament-access-code"] = codeAccessSession.code;
-      headers["x-operator-handle"] = encodeURIComponent(codeAccessSession.handleName || "code-operator");
-    }
-    return headers;
-  }
 
   async function verifyTournamentAccessCode() {
     if (!accessCodeInput.trim()) {
@@ -707,38 +712,32 @@ export default function HomePage() {
     }
     setAccessMessage("コードを確認しています...");
     try {
-      const res = await fetch(`/api/access-code/resolve?code=${encodeURIComponent(accessCodeInput.trim())}`);
+      const res = await fetch("/api/operator/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: accessCodeInput.trim(),
+          handleName: accessHandleInput.trim() || "code-operator",
+        }),
+      });
       const data = await res.json();
-      if (!res.ok || !data.valid || !data?.tournamentId) {
+      if (!res.ok || !data?.tournamentId) {
         throw new Error(data?.error || "コードが無効です");
       }
-      const tournamentName = typeof data?.tournamentName === "string" ? data.tournamentName.trim() : "";
       const resolvedTournamentId = String(data.tournamentId || "").trim();
       if (!resolvedTournamentId) {
         throw new Error("大会IDの解決に失敗しました");
       }
       setTournamentId(resolvedTournamentId);
-      if (tournamentName) {
-        setManagedTournaments((prev) => {
-          const index = prev.findIndex((item) => item.id === resolvedTournamentId);
-          if (index >= 0) {
-            const next = [...prev];
-            next[index] = { ...next[index], name: tournamentName };
-            return next;
-          }
-          return [...prev, { id: resolvedTournamentId, name: tournamentName }];
-        });
-        setPricingName((prev) => prev || tournamentName);
-      } else {
-        setManagedTournaments((prev) => (
-          prev.some((item) => item.id === resolvedTournamentId) ? prev : [...prev, { id: resolvedTournamentId, name: resolvedTournamentId }]
-        ));
-      }
+      setManagedTournaments((prev) => (
+        prev.some((item) => item.id === resolvedTournamentId) ? prev : [...prev, { id: resolvedTournamentId, name: resolvedTournamentId }]
+      ));
       setCodeAccessSession({
         active: true,
-        code: accessCodeInput.trim(),
         handleName: accessHandleInput.trim() || "code-operator",
+        tournamentId: resolvedTournamentId,
       });
+      setAccessCodeInput("");
       setAccessMessage("");
       setAccessOverlayOpen(false);
     } catch (error: any) {
@@ -782,24 +781,23 @@ export default function HomePage() {
       const res = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/access-code`);
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || res.statusText);
-      setIssuedAccessCode(String(data.accessCode || ""));
       setAccessCodeHistory(Array.isArray(data.history) ? data.history : []);
     } catch (error: any) {
       setAccessCodeAdminMessage(error?.message || "大会コード履歴の取得に失敗しました");
     }
   }
 
-  async function updateAccessCodeStatus(code: string, action: "disable" | "delete" | "activate") {
+  async function updateAccessCodeStatus(codeHash: string, action: "disable" | "delete" | "activate") {
     if (!authSession.authenticated || !tournamentId) return;
     try {
       const res = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/access-code`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, action }),
+        body: JSON.stringify({ codeHash, action }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || res.statusText);
-      setAccessCodeAdminMessage(`コード ${code} を${action === "disable" ? "無効化" : action === "delete" ? "削除" : "有効化"}しました`);
+      setAccessCodeAdminMessage(`コードを${action === "disable" ? "無効化" : action === "delete" ? "削除" : "有効化"}しました`);
       await loadAccessCodeHistory();
     } catch (error: any) {
       setAccessCodeAdminMessage(error?.message || "大会コード更新に失敗しました");
@@ -819,6 +817,7 @@ export default function HomePage() {
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     setAuthSession({ authenticated: false });
+    setCodeAccessSession({ active: false, handleName: "" });
     setTournamentMessage("");
     setTournamentError("");
   }
@@ -950,11 +949,11 @@ export default function HomePage() {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            ...buildOperatorHeaders(),
           },
           body: JSON.stringify({
             deltaAmount: delta,
             reasonLabel,
+            requestId: crypto.randomUUID(),
             operatorUserId: authSession.user?.id || codeAccessSession.handleName || "operator-demo",
             requiresReason: Boolean(adjustmentOption?.requiresReason),
           }),
@@ -993,12 +992,12 @@ export default function HomePage() {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
-            ...buildOperatorHeaders(),
           },
           body: JSON.stringify({
             adminNotes: editAdminNotes,
             deltaAmount: delta,
             reasonLabel,
+            requestId: crypto.randomUUID(),
             resetCheckIn,
             checkedIn: editCheckedIn,
             operatorUserId: authSession.user?.id || codeAccessSession.handleName || "operator-demo",
@@ -1162,15 +1161,16 @@ export default function HomePage() {
           .then(async (res) => {
             const data = await res.json();
             if (!res.ok) throw new Error(data?.error || res.statusText);
-            const deletedNames = Array.isArray(data?.deletedParticipants)
-              ? data.deletedParticipants
+            const missingNames = Array.isArray(data?.missingParticipants)
+              ? data.missingParticipants
                 .map((item: any) => String(item?.playerName || item?.participantId || "").trim())
                 .filter(Boolean)
               : [];
-            const deletedSummary = deletedNames.length > 0
-              ? ` / 削除: ${deletedNames.length}件（${deletedNames.join(", ")}）`
+            const missingPreview = missingNames.slice(0, 5).join(", ");
+            const missingSummary = Number(data?.missingCount || 0) > 0
+              ? ` / 未検出候補: ${data.missingCount}件${missingPreview ? `（${missingPreview}${missingNames.length > 5 ? " ..." : ""}）` : ""}`
               : "";
-            setOperatorMessage(`CSVをデータベースに保存しました（${data.count}件）${deletedSummary}`);
+            setOperatorMessage(`CSVを保存しました（upsert: ${data.upsertCount || 0}件 / skipped: ${data.skippedCount || 0}件）${missingSummary}`);
           })
           .catch((err) => setOperatorMessage(`CSV保存に失敗しました: ${err.message}`));
       },
@@ -1811,9 +1811,9 @@ export default function HomePage() {
               )}
               <div className="stack">
                 {accessCodeHistory.map((item) => (
-                  <div key={`${item.code}-${item.createdAt}`} className="card" style={{ background: "#0d1117" }}>
+                  <div key={`${item.codeHash}-${item.createdAt}`} className="card" style={{ background: "#0d1117" }}>
                     <div className="flex-between">
-                      <code>{item.code}</code>
+                      <code>{item.maskedCode || item.codeHash.slice(0, 12)}</code>
                       <span className={clsx("status", item.status === "active" ? "success" : "danger")}>{item.status}</span>
                     </div>
                     <div className="muted">発行: {item.createdAt || "-"}</div>
@@ -1822,7 +1822,7 @@ export default function HomePage() {
                       <button
                         className="button secondary"
                         type="button"
-                        onClick={() => updateAccessCodeStatus(item.code, "activate")}
+                        onClick={() => updateAccessCodeStatus(item.codeHash, "activate")}
                         disabled={item.status === "active"}
                       >
                         有効化
@@ -1830,7 +1830,7 @@ export default function HomePage() {
                       <button
                         className="button secondary"
                         type="button"
-                        onClick={() => updateAccessCodeStatus(item.code, "disable")}
+                        onClick={() => updateAccessCodeStatus(item.codeHash, "disable")}
                         disabled={item.status !== "active"}
                       >
                         無効化
@@ -1838,7 +1838,7 @@ export default function HomePage() {
                       <button
                         className="button secondary"
                         type="button"
-                        onClick={() => updateAccessCodeStatus(item.code, "delete")}
+                        onClick={() => updateAccessCodeStatus(item.codeHash, "delete")}
                         disabled={item.status === "deleted"}
                       >
                         削除
@@ -1872,7 +1872,7 @@ export default function HomePage() {
             </div>
             {operatorMessage && <div className="toast" style={{ marginTop: 8 }}>{operatorMessage}</div>}
             <div className="divider" />
-            <div className="muted">個人情報はアップロード前に破棄されます。CSVが再アップロードされた際は、チェックイン状況のみ維持したまま上書きします。</div>
+            <div className="muted">個人情報はアップロード前に破棄されます。CSV再アップロード時はチェックイン/席情報を維持しつつupsertし、未検出参加者は即時削除せず候補としてマークします。</div>
           </div>
         </div>
       )}

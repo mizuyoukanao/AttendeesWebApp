@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
+import { requireTournamentAccess } from "@/lib/authz";
 
 type SeatPatternConfig = {
   venueFeeNames: string[];
@@ -30,14 +30,6 @@ const defaultSeatAssignmentConfig: SeatAssignmentConfig = {
   },
 };
 
-function ensureAuthenticated() {
-  const accessToken = cookies().get("startgg_access_token")?.value;
-  if (!accessToken) {
-    return NextResponse.json({ error: "start.gg に未ログインです" }, { status: 401 });
-  }
-  return null;
-}
-
 function normalizePatternConfig(input: any): SeatPatternConfig {
   return {
     venueFeeNames: Array.isArray(input?.venueFeeNames)
@@ -64,11 +56,11 @@ function normalizeSeatAssignmentConfig(input: any): SeatAssignmentConfig {
 }
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const unauthorized = ensureAuthenticated();
-  if (unauthorized) return unauthorized;
+  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg", "operator_code"]);
+  if (!authz.ok) return authz.response;
 
   try {
     const firestore = ensureFirestore();
@@ -94,8 +86,8 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const unauthorized = ensureAuthenticated();
-  if (unauthorized) return unauthorized;
+  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg"]);
+  if (!authz.ok) return authz.response;
 
   const body = await request.json().catch(() => null);
   if (!body) {
