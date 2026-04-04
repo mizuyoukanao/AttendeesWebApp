@@ -159,10 +159,37 @@ export async function PATCH(
       } else if (action === "delete") {
         codes[idx] = { ...codes[idx], status: "deleted", lastUsedAt: now };
       } else if (action === "activate") {
+        const codeRef = firestore.collection("operatorAccessCodes");
+        const activeCodesQuery = codeRef
+          .where("tournamentId", "==", params.tournamentId)
+          .where("status", "==", "active");
+        const activeCodesSnap = await tx.get(activeCodesQuery);
+        const previousActiveHashes = activeCodesSnap.docs
+          .map((doc) => String(doc.id || "").trim())
+          .filter((hash) => hash && !timingSafeEqualHex(hash, targetCodeHash));
+
         for (let i = 0; i < codes.length; i += 1) {
           if (codes[i].status === "active") codes[i] = { ...codes[i], status: "disabled", lastUsedAt: now };
         }
         codes[idx] = { ...codes[idx], status: "active", lastUsedAt: now };
+
+        previousActiveHashes.forEach((hash) => {
+          tx.set(codeRef.doc(hash), {
+            codeHash: hash,
+            tournamentId: params.tournamentId,
+            status: "disabled",
+            lastUsedAt: now,
+            updatedAt: now,
+          }, { merge: true });
+        });
+
+        tx.set(codeRef.doc(targetCodeHash), {
+          codeHash: targetCodeHash,
+          tournamentId: params.tournamentId,
+          status: "active",
+          lastUsedAt: now,
+          updatedAt: now,
+        }, { merge: true });
       } else {
         throw new Error("BAD_ACTION");
       }
@@ -174,13 +201,15 @@ export async function PATCH(
         updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
 
-      tx.set(firestore.collection("operatorAccessCodes").doc(targetCodeHash), {
-        codeHash: targetCodeHash,
-        status: codes[idx].status,
-        tournamentId: params.tournamentId,
-        lastUsedAt: now,
-        updatedAt: now,
-      }, { merge: true });
+      if (action !== "activate") {
+        tx.set(firestore.collection("operatorAccessCodes").doc(targetCodeHash), {
+          codeHash: targetCodeHash,
+          status: codes[idx].status,
+          tournamentId: params.tournamentId,
+          lastUsedAt: now,
+          updatedAt: now,
+        }, { merge: true });
+      }
     });
 
     return NextResponse.json({ ok: true });
