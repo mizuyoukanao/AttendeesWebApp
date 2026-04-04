@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
-import { checkRateLimit } from "@/lib/rateLimit";
+import { checkRateLimit, getRequestIp } from "@/lib/rateLimit";
 import { createOperatorSignedSession, setSessionCookie } from "@/lib/session";
 import { hashAccessCode, normalizeAccessCode } from "@/lib/accessCode";
 
 export async function POST(request: NextRequest) {
-  const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
-  const limit = checkRateLimit(`operator-session:${ip}`, 10, 60_000);
+  const ip = getRequestIp(request.headers);
+  const limit = await checkRateLimit({ namespace: "operator_session", ip, limit: 10, windowSeconds: 300 });
   if (!limit.allowed) {
-    return NextResponse.json({ error: "リクエストが多すぎます" }, { status: 429 });
+    return NextResponse.json({ error: "リクエストが多すぎます", retryAfterSeconds: limit.retryAfterSeconds }, { status: 429 });
   }
 
   const body = await request.json().catch(() => null);
@@ -30,6 +30,11 @@ export async function POST(request: NextRequest) {
     }
 
     const tournamentId = String(codeData.tournamentId);
+    const tournamentSnap = await firestore.collection("tournaments").doc(tournamentId).get();
+    const activeHash = String(tournamentSnap.data()?.operatorAccessCodeHash || "").trim();
+    if (!activeHash || activeHash !== codeHash) {
+      return NextResponse.json({ error: "コードが無効です" }, { status: 401 });
+    }
     const session = createOperatorSignedSession({
       userId: `operator:${handleName}`,
       displayName: handleName,
