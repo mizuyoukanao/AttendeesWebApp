@@ -17,8 +17,8 @@ const SESSION_TTL_SECONDS = 60 * 60 * 8;
 const OPERATOR_SESSION_TTL_SECONDS = 60 * 60 * 4;
 
 function getSessionSecret() {
-  const secret = process.env.APP_SESSION_SECRET || process.env.SGGCS;
-  if (!secret) throw new Error("APP_SESSION_SECRET (or SGGCS) が未設定です");
+  const secret = process.env.APP_SESSION_SECRET;
+  if (!secret) throw new Error("APP_SESSION_SECRET が未設定です");
   return secret;
 }
 

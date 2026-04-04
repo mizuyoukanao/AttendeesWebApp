@@ -1,0 +1,35 @@
+runConfig:
+  minInstances: 0
+  maxInstances: 10
+  cpu: 1
+  memoryMiB: 512
+
+env:
+  - variable: SGGCID
+    value: "YOUR_STARTGG_CLIENT_ID"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: SGGOASCP
+    value: "identity tournaments:read"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: STARTGG_REDIRECT_URI
+    value: "https://YOUR_DOMAIN/api/auth/callback"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_BASE_URL
+    value: "https://YOUR_DOMAIN"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: APP_SESSION_SECRET
+    secret: APP_SESSION_SECRET
+    availability:
+      - RUNTIME
+  - variable: SGGCS
+    secret: SGGCS
+    availability:
+      - RUNTIME

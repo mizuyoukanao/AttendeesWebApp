@@ -41,7 +41,7 @@ const initialParticipants: Participant[] = [
     venueFeeName: "優先持参枠",
     payment: { totalTransaction: 4000, totalOwed: 0, totalPaid: 4000 },
     checkedIn: false,
-    editNotes: "",
+    seatLabel: "",
   },
   {
     participantId: "102",
@@ -50,7 +50,7 @@ const initialParticipants: Participant[] = [
     venueFeeName: "持参枠",
     payment: { totalTransaction: 0, totalOwed: 4000, totalPaid: 0 },
     checkedIn: false,
-    editNotes: "",
+    seatLabel: "",
   },
   {
     participantId: "103",
@@ -60,7 +60,7 @@ const initialParticipants: Participant[] = [
     payment: { totalTransaction: 0, totalOwed: 3000, totalPaid: 0 },
     checkedIn: true,
     checkedInAt: new Date().toISOString(),
-    editNotes: "2024-06-01 10:15 JST | 事前チェックイン反映",
+    seatLabel: "C-03",
   },
 ];
 
@@ -79,24 +79,19 @@ type Participant = {
   checkedIn: boolean;
   checkedInAt?: string;
   checkedInBy?: string;
-  editNotes?: string;
+  seatLabel?: string;
 };
 
 type AuthSession = {
   authenticated: boolean;
   user?: {
     id?: string;
-    slug?: string;
-    email?: string;
     name?: string;
-    gamerTag?: string;
   };
-};
-
-type CodeAccessSession = {
-  active: boolean;
-  handleName: string;
-  tournamentId?: string;
+  session?: {
+    mode?: "startgg" | "operator_code";
+    allowedTournamentIds?: string[];
+  };
 };
 
 type AccessCodeRecord = {
@@ -311,7 +306,6 @@ export default function HomePage() {
   const scannerContainerRef = useRef<HTMLDivElement>(null);
   const lostFoundScannerContainerRef = useRef<HTMLDivElement>(null);
   const [authSession, setAuthSession] = useState<AuthSession>({ authenticated: false });
-  const [codeAccessSession, setCodeAccessSession] = useState<CodeAccessSession>({ active: false, handleName: "" });
   const [accessCodeInput, setAccessCodeInput] = useState("");
   const [accessHandleInput, setAccessHandleInput] = useState("");
   const [accessOverlayOpen, setAccessOverlayOpen] = useState(true);
@@ -327,7 +321,7 @@ export default function HomePage() {
   const [tournamentError, setTournamentError] = useState("");
   const [isMobileViewport, setIsMobileViewport] = useState(false);
   const compactKiosk = isMobileViewport;
-  const hasOperatorAccess = authSession.authenticated || codeAccessSession.active;
+  const hasOperatorAccess = Boolean(authSession.authenticated);
   const activeAccessCode = issuedAccessCode;
   const shareUrl = typeof window !== "undefined" && activeAccessCode
     ? `${window.location.origin}${window.location.pathname}?tournamentId=${encodeURIComponent(tournamentId)}&code=${encodeURIComponent(activeAccessCode)}`
@@ -510,7 +504,7 @@ export default function HomePage() {
       setFirestoreError("");
     };
 
-    const onSnapshotEvent = (event: MessageEvent) => {
+    const snapshotEventHandler = (event: MessageEvent) => {
       try {
         applyPayload(JSON.parse(event.data));
       } catch {
@@ -526,7 +520,7 @@ export default function HomePage() {
       }
     };
 
-    source.addEventListener("snapshot", onSnapshotEvent);
+    source.addEventListener("snapshot", snapshotEventHandler);
     source.addEventListener("update", onUpdateEvent);
 
     source.onerror = async () => {
@@ -543,7 +537,7 @@ export default function HomePage() {
 
     return () => {
       closed = true;
-      source.removeEventListener("snapshot", onSnapshotEvent);
+      source.removeEventListener("snapshot", snapshotEventHandler);
       source.removeEventListener("update", onUpdateEvent);
       source.close();
     };
@@ -732,11 +726,7 @@ export default function HomePage() {
       setManagedTournaments((prev) => (
         prev.some((item) => item.id === resolvedTournamentId) ? prev : [...prev, { id: resolvedTournamentId, name: resolvedTournamentId }]
       ));
-      setCodeAccessSession({
-        active: true,
-        handleName: accessHandleInput.trim() || "code-operator",
-        tournamentId: resolvedTournamentId,
-      });
+      await refreshSession();
       setAccessCodeInput("");
       setAccessMessage("");
       setAccessOverlayOpen(false);
@@ -817,7 +807,6 @@ export default function HomePage() {
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     setAuthSession({ authenticated: false });
-    setCodeAccessSession({ active: false, handleName: "" });
     setTournamentMessage("");
     setTournamentError("");
   }
@@ -926,7 +915,7 @@ export default function HomePage() {
     if (!scanResult) return;
     if (scanResult.checkedIn) return;
     if (!hasOperatorAccess) {
-      setKioskMessage("チェックインにはstart.ggログインまたは大会コード認証が必要です");
+      setKioskMessage("チェックインにはログインが必要です");
       return;
     }
     if (!tournamentId) {
@@ -954,7 +943,6 @@ export default function HomePage() {
             deltaAmount: delta,
             reasonLabel,
             requestId: crypto.randomUUID(),
-            operatorUserId: authSession.user?.id || codeAccessSession.handleName || "operator-demo",
             requiresReason: Boolean(adjustmentOption?.requiresReason),
           }),
         },
@@ -974,7 +962,7 @@ export default function HomePage() {
   async function updateParticipantStatus(target: Participant, resetCheckIn: boolean) {
     if (!tournamentId || !hasOperatorAccess) {
       const msg = !hasOperatorAccess
-        ? "編集にはstart.ggログインまたは大会コード認証が必要です"
+        ? "編集にはログインが必要です"
         : "対象大会を選択してください";
       setOperatorMessage(msg);
       setKioskMessage(msg);
@@ -1000,7 +988,6 @@ export default function HomePage() {
             requestId: crypto.randomUUID(),
             resetCheckIn,
             checkedIn: editCheckedIn,
-            operatorUserId: authSession.user?.id || codeAccessSession.handleName || "operator-demo",
             requiresReason: Boolean(editAdjustmentOption?.requiresReason),
           }),
         },
@@ -1144,7 +1131,6 @@ export default function HomePage() {
               totalPaid,
             },
             checkedIn,
-            editNotes: "",
           };
         }).filter((p) => p.participantId);
 
@@ -1189,12 +1175,11 @@ export default function HomePage() {
       ID: participant.participantId,
       プレイヤー名: getDisplayName(participant),
       枠: participant.venueFeeName || "",
-      台番号: participant.adminNotes || "",
+      台番号: participant.seatLabel || participant.adminNotes || "",
       totalTransaction: participant.payment.totalTransaction ?? 0,
       totalOwed: participant.payment.totalOwed ?? 0,
       totalPaid: participant.payment.totalPaid ?? 0,
       チェックイン: participant.checkedIn ? "true" : "false",
-      editNotes: participant.editNotes || "",
     }));
     const csv = Papa.unparse(rows);
     const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8;" });
@@ -1471,7 +1456,7 @@ export default function HomePage() {
               ))}
             </select>
             <div ref={scannerContainerRef} style={{ borderRadius: 12, overflow: "hidden" }} />
-            {!hasOperatorAccess && <div className="toast">チェックイン処理にはstart.ggログインまたは大会コード認証が必要です。</div>}
+            {!hasOperatorAccess && <div className="toast">チェックイン処理にはログインが必要です。</div>}
             <div className="divider" />
             <label className="label" htmlFor="manual-qr">手動入力（QR文字列）</label>
             <input
@@ -1584,7 +1569,7 @@ export default function HomePage() {
               大会を選択した状態で、遺失物に付与されたQR（参加者チェックインQRと同形式）を読み取ると、持ち主と対戦台番号を表示します。
             </p>
             {!tournamentId && <div className="toast danger">先に対象大会を選択してください。</div>}
-            {!hasOperatorAccess && <div className="toast">読み取りにはstart.ggログインまたは大会コード認証が必要です。</div>}
+            {!hasOperatorAccess && <div className="toast">読み取りにはログインが必要です。</div>}
             <div ref={lostFoundScannerContainerRef} style={{ borderRadius: 12, overflow: "hidden" }} />
             <div className="divider" />
             <label className="label" htmlFor="lost-found-manual-qr">手動入力（QR文字列）</label>
@@ -1880,7 +1865,7 @@ export default function HomePage() {
       {activeTab === "dashboard" && (
         <div className="card">
           <div className="section-title">チェックイン状況</div>
-          {!hasOperatorAccess && <div className="toast">一覧の閲覧にはstart.ggログインまたは大会コード認証が必要です。</div>}
+          {!hasOperatorAccess && <div className="toast">一覧の閲覧にはログインが必要です。</div>}
           {hasOperatorAccess && (
             <>
           <div className="stack" style={{ marginBottom: 12 }}>
@@ -2069,7 +2054,6 @@ export default function HomePage() {
                     <div className="muted">枠: {p.venueFeeName || "-"}</div>
                     <div className="muted">台番号: {p.adminNotes || "-"}</div>
                     <div className="muted">チェックイン: {p.checkedIn ? formatTimestampJst(new Date(p.checkedInAt || "")) : "未"}</div>
-                    {p.editNotes && <div className="muted">editNotes: {p.editNotes}</div>}
                     <button className="button secondary" type="button" onClick={() => openParticipantEditor(p)}>編集</button>
                   </div>
                 );
@@ -2087,7 +2071,6 @@ export default function HomePage() {
                     <th>台番号</th>
                     <th>支払い</th>
                     <th>チェックイン</th>
-                    <th>editNotes</th>
                     <th>操作</th>
                   </tr>
                 </thead>
@@ -2110,7 +2093,6 @@ export default function HomePage() {
                           <span className={clsx("status", status.status === "prepaid" ? "success" : "danger")}>{status.label}</span>
                         </td>
                         <td>{p.checkedIn ? formatTimestampJst(new Date(p.checkedInAt || "")) : "未"}</td>
-                        <td>{p.editNotes || ""}</td>
                         <td>
                           <button
                             className="button secondary"

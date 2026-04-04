@@ -61,13 +61,12 @@ export async function PATCH(
   const reasonLabel = String(body.reasonLabel || "編集").trim();
   const deltaAmount = Number(body.deltaAmount ?? 0);
   const requestId = typeof body.requestId === "string" ? body.requestId.trim().slice(0, 128) : "";
-  const requestedUserId = String(body.operatorUserId || "").trim();
 
   const accessToken = request.cookies.get("startgg_access_token")?.value || "";
   const actor = getActorFromSession(authz.session);
   const actorDisplayName = authz.session.mode === "startgg" && accessToken
-    ? await resolveOperatorUserId(accessToken, requestedUserId || actor.actorDisplayName)
-    : (requestedUserId || actor.actorDisplayName);
+    ? await resolveOperatorUserId(accessToken, actor.actorDisplayName)
+    : actor.actorDisplayName;
 
   try {
     const firestore = ensureFirestore();

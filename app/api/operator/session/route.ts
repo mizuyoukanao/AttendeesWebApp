@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { createOperatorSignedSession, setSessionCookie } from "@/lib/session";
-import { hashAccessCode, normalizeAccessCode, timingSafeEqualHex } from "@/lib/accessCode";
+import { hashAccessCode, normalizeAccessCode } from "@/lib/accessCode";
 
 export async function POST(request: NextRequest) {
   const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
@@ -25,32 +25,11 @@ export async function POST(request: NextRequest) {
     const codeSnap = await firestore.collection("operatorAccessCodes").doc(codeHash).get();
     const codeData = codeSnap.data();
 
-    let tournamentId = "";
-    if (codeSnap.exists && codeData?.status === "active" && codeData?.tournamentId) {
-      tournamentId = String(codeData.tournamentId);
-    } else {
-      const hashSnap = await firestore.collection("tournaments").where("operatorAccessCodeHash", "==", codeHash).limit(1).get();
-      if (!hashSnap.empty) {
-        const doc = hashSnap.docs[0];
-        const activeHash = String(doc.data()?.operatorAccessCodeHash || "").trim();
-        if (activeHash && timingSafeEqualHex(activeHash, codeHash)) {
-          tournamentId = doc.id;
-        }
-      }
-
-      if (!tournamentId) {
-        // 旧データ互換
-        const legacySnap = await firestore.collection("tournaments").where("operatorAccessCode", "==", code).limit(1).get();
-        if (!legacySnap.empty) {
-          tournamentId = legacySnap.docs[0].id;
-        }
-      }
-    }
-
-    if (!tournamentId) {
+    if (!codeSnap.exists || codeData?.status !== "active" || !codeData?.tournamentId) {
       return NextResponse.json({ error: "コードが無効です" }, { status: 401 });
     }
 
+    const tournamentId = String(codeData.tournamentId);
     const session = createOperatorSignedSession({
       userId: `operator:${handleName}`,
       displayName: handleName,

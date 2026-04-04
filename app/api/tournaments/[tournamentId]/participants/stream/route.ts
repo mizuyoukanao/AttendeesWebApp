@@ -18,7 +18,7 @@ type StreamParticipant = {
   checkedIn: boolean;
   checkedInAt?: string;
   checkedInBy?: string;
-  editNotes?: string;
+  seatLabel?: string;
 };
 
 function serializeSse(event: string, payload: unknown) {
@@ -39,7 +39,7 @@ function normalizeParticipant(id: string, raw: any): StreamParticipant {
     checkedIn: Boolean(raw?.checkedIn),
     checkedInAt: raw?.checkedInAt?.toDate ? raw.checkedInAt.toDate().toISOString() : raw?.checkedInAt || undefined,
     checkedInBy: raw?.checkedInBy || undefined,
-    editNotes: String(raw?.editNotes || ""),
+    seatLabel: String(raw?.seatLabel || ""),
   };
 }
 

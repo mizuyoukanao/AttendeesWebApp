@@ -15,8 +15,25 @@ type ParticipantPayload = {
     totalOwed?: number;
     totalPaid?: number;
   };
-  editNotes?: string;
 };
+
+function toParticipantResponse(id: string, raw: any) {
+  return {
+    participantId: id,
+    playerName: String(raw?.playerName || id),
+    adminNotes: String(raw?.adminNotes || ""),
+    venueFeeName: String(raw?.venueFeeName || ""),
+    payment: {
+      totalTransaction: Number(raw?.payment?.totalTransaction ?? 0),
+      totalOwed: Number(raw?.payment?.totalOwed ?? 0),
+      totalPaid: Number(raw?.payment?.totalPaid ?? 0),
+    },
+    checkedIn: Boolean(raw?.checkedIn),
+    checkedInAt: raw?.checkedInAt?.toDate ? raw.checkedInAt.toDate().toISOString() : raw?.checkedInAt || undefined,
+    checkedInBy: raw?.checkedInBy || undefined,
+    seatLabel: String(raw?.seatLabel || ""),
+  };
+}
 
 function normalizeParticipant(input: any): ParticipantPayload | null {
   const participantId = String(input?.participantId || input?.Id || "").trim();
@@ -35,7 +52,6 @@ function normalizeParticipant(input: any): ParticipantPayload | null {
       totalOwed: Number(payment.totalOwed ?? payment["Total Owed"] ?? 0),
       totalPaid: Number(payment.totalPaid ?? payment["Total Paid"] ?? 0),
     },
-    editNotes: typeof input?.editNotes === "string" ? input.editNotes : undefined,
   };
 }
 
@@ -55,7 +71,7 @@ export async function GET(
       .orderBy("participantId")
       .get();
 
-    const participants = participantsSnap.docs.map((doc) => ({ participantId: doc.id, ...doc.data() }));
+    const participants = participantsSnap.docs.map((doc) => toParticipantResponse(doc.id, doc.data()));
     return NextResponse.json({ participants });
   } catch (error: any) {
     return NextResponse.json({ error: error?.message ?? "participants取得エラー" }, { status: 500 });
