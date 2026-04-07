@@ -113,6 +113,7 @@ type ManagedTournament = {
 };
 
 const TOURNAMENT_CACHE_KEY = "known_tournaments";
+const ISSUED_ACCESS_CODE_CACHE_KEY = "issued_access_codes";
 
 type PaymentStatus = {
   status: "prepaid" | "due" | "refund";
@@ -207,6 +208,31 @@ function normalizeTournamentCache(input: unknown): ManagedTournament[] {
     }))
     .filter((item) => item.id);
   return Array.from(new Map(normalized.map((item) => [item.id, item])).values());
+}
+
+function readIssuedAccessCodeCache(): Record<string, string> {
+  try {
+    const raw = window.localStorage.getItem(ISSUED_ACCESS_CODE_CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    return Object.entries(parsed).reduce<Record<string, string>>((acc, [key, value]) => {
+      const tournamentKey = String(key || "").trim();
+      const code = String(value || "").trim();
+      if (tournamentKey && code) acc[tournamentKey] = code;
+      return acc;
+    }, {});
+  } catch {
+    return {};
+  }
+}
+
+function writeIssuedAccessCodeCache(next: Record<string, string>) {
+  try {
+    window.localStorage.setItem(ISSUED_ACCESS_CODE_CACHE_KEY, JSON.stringify(next));
+  } catch {
+    // ignore storage write errors
+  }
 }
 
 function expandAlphabetRange(start: string, end: string): string[] {
@@ -468,6 +494,8 @@ export default function HomePage() {
     if (authSession.authenticated) {
       loadSeatAssignmentConfig(tournamentId);
       loadAccessCodeHistory();
+      const issuedAccessCodes = readIssuedAccessCodeCache();
+      setIssuedAccessCode(issuedAccessCodes[tournamentId] || "");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tournamentId, authSession.authenticated, hasOperatorAccess]);
@@ -755,7 +783,13 @@ export default function HomePage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || res.statusText);
-      setIssuedAccessCode(String(data.accessCode || ""));
+      const nextCode = String(data.accessCode || "").trim();
+      setIssuedAccessCode(nextCode);
+      const issuedAccessCodes = readIssuedAccessCodeCache();
+      writeIssuedAccessCodeCache({
+        ...issuedAccessCodes,
+        [tournamentId]: nextCode,
+      });
       setAccessMessage("大会コードを発行しました");
       await loadAccessCodeHistory();
     } catch (error: any) {
