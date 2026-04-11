@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Html5QrcodeScanner } from "html5-qrcode";
 import clsx from "clsx";
 import Papa from "papaparse";
@@ -285,7 +285,8 @@ export default function HomePage() {
   const [customReason, setCustomReason] = useState("");
   const [customAmount, setCustomAmount] = useState(0);
   const [operatorMessage, setOperatorMessage] = useState("");
-  const [kioskMessage, setKioskMessage] = useState("");
+  const [isCsvUploading, setIsCsvUploading] = useState(false);
+  const [kioskMessage, setKioskMessage] = useState<ReactNode>("");
   const [lostFoundRaw, setLostFoundRaw] = useState("");
   const [lostFoundResult, setLostFoundResult] = useState<Participant | null>(null);
   const [lostFoundError, setLostFoundError] = useState("");
@@ -310,6 +311,7 @@ export default function HomePage() {
   const [accessHandleInput, setAccessHandleInput] = useState("");
   const [accessOverlayOpen, setAccessOverlayOpen] = useState(true);
   const [accessMessage, setAccessMessage] = useState("");
+  const [pendingDeepLinkCode, setPendingDeepLinkCode] = useState("");
   const [issuingAccessCode, setIssuingAccessCode] = useState(false);
   const [issuedAccessCode, setIssuedAccessCode] = useState("");
   const [accessCodeHistory, setAccessCodeHistory] = useState<AccessCodeRecord[]>([]);
@@ -432,8 +434,17 @@ export default function HomePage() {
     }
     if (queryCode) {
       setAccessCodeInput(queryCode);
+      setPendingDeepLinkCode(queryCode);
     }
   }, []);
+
+  useEffect(() => {
+    if (!pendingDeepLinkCode) return;
+    verifyTournamentAccessCode(pendingDeepLinkCode, true).finally(() => {
+      setPendingDeepLinkCode("");
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingDeepLinkCode]);
 
   useEffect(() => {
     setAccessOverlayOpen(!hasOperatorAccess);
@@ -699,18 +710,19 @@ export default function HomePage() {
   }
 
 
-  async function verifyTournamentAccessCode() {
-    if (!accessCodeInput.trim()) {
+  async function verifyTournamentAccessCode(codeOverride?: string, fromDeepLink = false) {
+    const code = (codeOverride ?? accessCodeInput).trim();
+    if (!code) {
       setAccessMessage("大会コードを入力してください");
       return;
     }
-    setAccessMessage("コードを確認しています...");
+    setAccessMessage(fromDeepLink ? "リンク内のコードを確認しています..." : "コードを確認しています...");
     try {
       const res = await fetch("/api/operator/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          code: accessCodeInput.trim(),
+          code,
           handleName: accessHandleInput.trim() || "code-operator",
         }),
       });
@@ -731,7 +743,12 @@ export default function HomePage() {
       setAccessMessage("");
       setAccessOverlayOpen(false);
     } catch (error: any) {
-      setAccessMessage(error?.message || "コード認証に失敗しました");
+      if (fromDeepLink) {
+        setAccessOverlayOpen(true);
+        setAccessMessage(`リンク内コードの認証に失敗しました: ${error?.message || "不明なエラー"}`);
+      } else {
+        setAccessMessage(error?.message || "コード認証に失敗しました");
+      }
     }
   }
 
@@ -822,15 +839,19 @@ export default function HomePage() {
       if (!res.ok) throw new Error(data?.error || res.statusText);
 
       const tournaments = normalizeTournamentCache((data.tournaments as ManagedTournament[]) || []);
-      setManagedTournaments(tournaments);
+      const preserved = tournamentId && !tournaments.some((item) => item.id === tournamentId)
+        ? [{ id: tournamentId, name: pricingName || tournamentId }, ...tournaments]
+        : tournaments;
+      const merged = Array.from(new Map(preserved.map((item) => [item.id, item])).values());
+      setManagedTournaments(merged);
 
-      if (tournaments.length === 0) {
+      if (merged.length === 0) {
         setTournamentId("demo-tournament");
-      } else if (!tournaments.some((item) => item.id === tournamentId) || tournamentId === "demo-tournament") {
-        setTournamentId(tournaments[0].id);
+      } else if (!tournamentId || tournamentId === "demo-tournament") {
+        setTournamentId(merged[0].id);
       }
-      if (tournaments[0]?.name) {
-        setPricingName((prev) => prev || tournaments[0].name || "");
+      if (merged[0]?.name) {
+        setPricingName((prev) => prev || merged[0].name || "");
       }
 
       setTournamentMessage(`${tournaments.length}件の大会を取得しました`);
@@ -949,9 +970,18 @@ export default function HomePage() {
       );
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || res.statusText);
+      const autoSeatAssigned = Boolean(seatAssignmentConfig.autoOnCheckin.enabled && data?.assignedSeat);
       const seatSuffix = data?.assignedSeat ? `（対戦台: ${data.assignedSeat}）` : "";
       setOperatorMessage(`${getDisplayName(scanResult)} をチェックインしました${seatSuffix}`);
-      setKioskMessage(`${getDisplayName(scanResult)} をチェックインしました${seatSuffix}。次の参加者を読み取ってください。`);
+      if (autoSeatAssigned) {
+        setKioskMessage(
+          <>
+            {getDisplayName(scanResult)} をチェックインしました（対戦台: <strong>{data.assignedSeat}</strong>）。次の参加者を読み取ってください。
+          </>,
+        );
+      } else {
+        setKioskMessage(`${getDisplayName(scanResult)} をチェックインしました${seatSuffix}。次の参加者を読み取ってください。`);
+      }
       clearCurrentParticipant();
     } catch (error: any) {
       setOperatorMessage(`チェックインに失敗しました: ${error?.message || "unknown"}`);
@@ -1073,6 +1103,7 @@ export default function HomePage() {
       setOperatorMessage("大会を選択してください");
       return;
     }
+    setIsCsvUploading(true);
     setOperatorMessage("CSVを解析・アップロードしています...");
     Papa.parse(file, {
       skipEmptyLines: "greedy",
@@ -1085,6 +1116,7 @@ export default function HomePage() {
 
         if (headerIndex === -1) {
           setOperatorMessage("ヘッダー行を特定できませんでした");
+          setIsCsvUploading(false);
           return;
         }
 
@@ -1136,6 +1168,7 @@ export default function HomePage() {
 
         if (!importedParticipants.length) {
           setOperatorMessage("取り込めるデータがありません");
+          setIsCsvUploading(false);
           return;
         }
 
@@ -1158,9 +1191,13 @@ export default function HomePage() {
               : "";
             setOperatorMessage(`CSVを保存しました（upsert: ${data.upsertCount || 0}件 / skipped: ${data.skippedCount || 0}件）${missingSummary}`);
           })
-          .catch((err) => setOperatorMessage(`CSV保存に失敗しました: ${err.message}`));
+          .catch((err) => setOperatorMessage(`CSV保存に失敗しました: ${err.message}`))
+          .finally(() => setIsCsvUploading(false));
       },
-      error: () => setOperatorMessage("CSVの解析に失敗しました"),
+      error: () => {
+        setOperatorMessage("CSVの解析に失敗しました");
+        setIsCsvUploading(false);
+      },
     });
   }
 
@@ -1363,7 +1400,7 @@ export default function HomePage() {
           onChange={(e) => setAccessHandleInput(e.target.value)}
           placeholder="受付担当名"
         />
-        <button className="button secondary" type="button" onClick={verifyTournamentAccessCode}>
+        <button className="button secondary" type="button" onClick={() => verifyTournamentAccessCode()}>
           コードで認証
         </button>
         {accessMessage && <div className="toast">{accessMessage}</div>}
@@ -1488,6 +1525,7 @@ export default function HomePage() {
                 </div>
                 <div className="tag-grid">
                   <span className="badge">ID: {scanResult.participantId}</span>
+                  <span className="badge">枠: {scanResult.venueFeeName || "-"}</span>
                   <span className="badge">対戦台: {scanResult.adminNotes || "未割当"}</span>
                   <span className="badge">Total Transaction: {scanResult.payment.totalTransaction}</span>
                   <span className="badge">Total Owed: {scanResult.payment.totalOwed}</span>
@@ -1851,7 +1889,7 @@ export default function HomePage() {
               disabled={!authSession.authenticated}
             />
             <div className="flex" style={{ marginTop: 8, gap: 8 }}>
-              <button className="button secondary" type="button" onClick={exportParticipantsCsv}>
+              <button className="button secondary" type="button" onClick={exportParticipantsCsv} disabled={isCsvUploading}>
                 最新参加者CSVをエクスポート
               </button>
             </div>
