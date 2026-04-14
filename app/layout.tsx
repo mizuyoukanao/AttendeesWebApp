@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "start.gg Check-in Kiosk",
-  description: "QR check-in kiosk and operator dashboard demo built with Next.js",
+  title: "AttendeesWebApp",
+  description: "QR check-in and operator dashboard",
 };
 
 export default function RootLayout({
