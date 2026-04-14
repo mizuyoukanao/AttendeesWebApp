@@ -112,6 +112,14 @@ type ManagedTournament = {
   countryCode?: string;
 };
 
+type CsvDiffWarning = {
+  incomingParticipants: Participant[];
+  differenceCount: number;
+  existingCount: number;
+  incomingCount: number;
+  differenceRatio: number;
+};
+
 const TOURNAMENT_CACHE_KEY = "known_tournaments";
 
 type PaymentStatus = {
@@ -286,6 +294,7 @@ export default function HomePage() {
   const [customAmount, setCustomAmount] = useState(0);
   const [operatorMessage, setOperatorMessage] = useState("");
   const [isCsvUploading, setIsCsvUploading] = useState(false);
+  const [csvDiffWarning, setCsvDiffWarning] = useState<CsvDiffWarning | null>(null);
   const [kioskMessage, setKioskMessage] = useState<ReactNode>("");
   const [lostFoundRaw, setLostFoundRaw] = useState("");
   const [lostFoundResult, setLostFoundResult] = useState<Participant | null>(null);
@@ -1172,33 +1181,74 @@ export default function HomePage() {
           return;
         }
 
-        fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/participants`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ participants: importedParticipants }),
-        })
-          .then(async (res) => {
-            const data = await res.json();
-            if (!res.ok) throw new Error(data?.error || res.statusText);
-            const missingNames = Array.isArray(data?.missingParticipants)
-              ? data.missingParticipants
-                .map((item: any) => String(item?.playerName || item?.participantId || "").trim())
-                .filter(Boolean)
-              : [];
-            const missingPreview = missingNames.slice(0, 5).join(", ");
-            const missingSummary = Number(data?.missingCount || 0) > 0
-              ? ` / 未検出候補: ${data.missingCount}件${missingPreview ? `（${missingPreview}${missingNames.length > 5 ? " ..." : ""}）` : ""}`
-              : "";
-            setOperatorMessage(`CSVを保存しました（upsert: ${data.upsertCount || 0}件 / skipped: ${data.skippedCount || 0}件）${missingSummary}`);
-          })
-          .catch((err) => setOperatorMessage(`CSV保存に失敗しました: ${err.message}`))
-          .finally(() => setIsCsvUploading(false));
+        const diffStats = calculateCsvDifferenceStats(participants, importedParticipants);
+        if (participants.length > 0 && diffStats.differenceRatio >= (1 / 3)) {
+          setCsvDiffWarning({
+            incomingParticipants: importedParticipants,
+            differenceCount: diffStats.differenceCount,
+            existingCount: diffStats.existingCount,
+            incomingCount: diffStats.incomingCount,
+            differenceRatio: diffStats.differenceRatio,
+          });
+          setOperatorMessage("");
+          setIsCsvUploading(false);
+          return;
+        }
+
+        uploadParticipantsFromCsv(importedParticipants);
       },
       error: () => {
         setOperatorMessage("CSVの解析に失敗しました");
         setIsCsvUploading(false);
       },
     });
+  }
+
+  function calculateCsvDifferenceStats(existing: Participant[], incoming: Participant[]) {
+    const existingIds = new Set(existing.map((p) => String(p.participantId || "").trim()).filter(Boolean));
+    const incomingIds = new Set(incoming.map((p) => String(p.participantId || "").trim()).filter(Boolean));
+    const onlyExisting = Array.from(existingIds).filter((id) => !incomingIds.has(id)).length;
+    const onlyIncoming = Array.from(incomingIds).filter((id) => !existingIds.has(id)).length;
+    const differenceCount = onlyExisting + onlyIncoming;
+    const denominator = Math.max(existingIds.size, incomingIds.size, 1);
+    const differenceRatio = differenceCount / denominator;
+    return {
+      differenceCount,
+      existingCount: existingIds.size,
+      incomingCount: incomingIds.size,
+      differenceRatio,
+    };
+  }
+
+  function uploadParticipantsFromCsv(importedParticipants: Participant[]) {
+    if (!tournamentId) {
+      setOperatorMessage("大会を選択してください");
+      return;
+    }
+    setIsCsvUploading(true);
+    setCsvDiffWarning(null);
+    setOperatorMessage("CSVを保存しています...");
+    fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/participants`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ participants: importedParticipants }),
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || res.statusText);
+        const missingNames = Array.isArray(data?.missingParticipants)
+          ? data.missingParticipants
+            .map((item: any) => String(item?.playerName || item?.participantId || "").trim())
+            .filter(Boolean)
+          : [];
+        const missingPreview = missingNames.slice(0, 5).join(", ");
+        const missingSummary = Number(data?.missingCount || 0) > 0
+          ? ` / 未検出候補: ${data.missingCount}件${missingPreview ? `（${missingPreview}${missingNames.length > 5 ? " ..." : ""}）` : ""}`
+          : "";
+        setOperatorMessage(`CSVを保存しました（upsert: ${data.upsertCount || 0}件 / skipped: ${data.skippedCount || 0}件）${missingSummary}`);
+      })
+      .catch((err) => setOperatorMessage(`CSV保存に失敗しました: ${err.message}`))
+      .finally(() => setIsCsvUploading(false));
   }
 
   function exportParticipantsCsv() {
@@ -1404,6 +1454,38 @@ export default function HomePage() {
           コードで認証
         </button>
         {accessMessage && <div className="toast">{accessMessage}</div>}
+      </div>
+    </div>
+  ) : null;
+
+  const csvWarningOverlay = csvDiffWarning ? (
+    <div className="editor-modal-backdrop">
+      <div className="stack editor-modal" style={{ maxWidth: 560 }}>
+        <div style={{ fontWeight: 700, fontSize: 18 }}>CSV差分の警告</div>
+        <div className="muted">
+          既存の参加者データと比較して差分が大きいため、誤アップロードの可能性があります。
+        </div>
+        <div className="muted">
+          既存: {csvDiffWarning.existingCount}名 / 新規CSV: {csvDiffWarning.incomingCount}名 / 差分: {csvDiffWarning.differenceCount}名（{(csvDiffWarning.differenceRatio * 100).toFixed(1)}%）
+        </div>
+        <div className="muted">
+          差分が 33.3% 以上のため確認しています。このままアップロードしますか？
+        </div>
+        <div className="flex" style={{ gap: 8 }}>
+          <button className="button" type="button" onClick={() => uploadParticipantsFromCsv(csvDiffWarning.incomingParticipants)}>
+            アップロードする
+          </button>
+          <button
+            className="button secondary"
+            type="button"
+            onClick={() => {
+              setCsvDiffWarning(null);
+              setOperatorMessage("CSVアップロードをキャンセルしました");
+            }}
+          >
+            キャンセル
+          </button>
+        </div>
       </div>
     </div>
   ) : null;
@@ -2160,6 +2242,7 @@ export default function HomePage() {
       )}
       {participantEditor}
       {accessOverlay}
+      {csvWarningOverlay}
     </div>
   );
 }
