@@ -1163,7 +1163,7 @@ export default function HomePage() {
 
   async function handleManualEntryCheckIn() {
     if (!hasOperatorAccess) {
-      setManualEntryMessage("追加エントリーにはログインが必要です");
+      setManualEntryMessage("追加エントリーには start.gg ログインまたは大会固有コード認証が必要です");
       return;
     }
     if (!tournamentId) {
