@@ -163,6 +163,17 @@ function parseParticipantIdFromQr(raw: string) {
   return digitsOnly ? digitsOnly[0] : null;
 }
 
+function isIgnorableScannerError(message: string) {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return true;
+  return (
+    normalized.includes("not found")
+    || normalized.includes("no qr code found")
+    || normalized.includes("no multiformat readers were able to detect")
+    || normalized.includes("qr code parse error")
+  );
+}
+
 function computePaymentStatus(
   participant: Participant,
   studentDiscount: boolean,
@@ -315,12 +326,12 @@ export default function HomePage() {
   const [editCheckedIn, setEditCheckedIn] = useState(false);
   const scannerContainerRef = useRef<HTMLDivElement>(null);
   const lostFoundScannerContainerRef = useRef<HTMLDivElement>(null);
+  const lastScannedParticipantIdRef = useRef<string>("");
   const [authSession, setAuthSession] = useState<AuthSession>({ authenticated: false });
   const [accessCodeInput, setAccessCodeInput] = useState("");
   const [accessHandleInput, setAccessHandleInput] = useState("");
   const [accessOverlayOpen, setAccessOverlayOpen] = useState(true);
   const [accessMessage, setAccessMessage] = useState("");
-  const [pendingDeepLinkCode, setPendingDeepLinkCode] = useState("");
   const [issuingAccessCode, setIssuingAccessCode] = useState(false);
   const [issuedAccessCode, setIssuedAccessCode] = useState("");
   const [accessCodeHistory, setAccessCodeHistory] = useState<AccessCodeRecord[]>([]);
@@ -368,9 +379,10 @@ export default function HomePage() {
       (decoded) => {
         setScannerError("");
         setScanRaw(decoded);
-        handleLookup(decoded);
+        handleLookup(decoded, { fromScanner: true, preserveCurrentOnFailure: true });
       },
       (error) => {
+        if (isIgnorableScannerError(error)) return;
         setScannerError(error);
       },
     );
@@ -443,17 +455,10 @@ export default function HomePage() {
     }
     if (queryCode) {
       setAccessCodeInput(queryCode);
-      setPendingDeepLinkCode(queryCode);
+      setAccessOverlayOpen(true);
+      setAccessMessage("リンクの大会コードを読み込みました。ハンドルネームを入力して認証してください。");
     }
   }, []);
-
-  useEffect(() => {
-    if (!pendingDeepLinkCode) return;
-    verifyTournamentAccessCode(pendingDeepLinkCode, true).finally(() => {
-      setPendingDeepLinkCode("");
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingDeepLinkCode]);
 
   useEffect(() => {
     setAccessOverlayOpen(!hasOperatorAccess);
@@ -885,16 +890,34 @@ export default function HomePage() {
     }
   }
 
-  function handleLookup(raw: string) {
+  function handleLookup(raw: string, options?: { fromScanner?: boolean; preserveCurrentOnFailure?: boolean }) {
     const participantId = parseParticipantIdFromQr(raw);
     if (!participantId) {
-      setScanResult(null);
-      setScannerError("QRから参加者IDを取得できませんでした");
+      if (!options?.preserveCurrentOnFailure) {
+        setScanResult(null);
+      }
+      if (!options?.fromScanner) {
+        setScannerError("QRから参加者IDを取得できませんでした");
+      }
       return;
     }
+
+    if (options?.fromScanner && participantId === lastScannedParticipantIdRef.current) {
+      return;
+    }
+
     const participant = participants.find((p) => p.participantId === participantId) || null;
-    setScanResult(participant);
-    setScannerError(participant ? "" : "対象の参加者が見つかりません");
+    if (participant) {
+      setScanResult(participant);
+      lastScannedParticipantIdRef.current = participantId;
+      setScannerError("");
+      return;
+    }
+
+    if (!options?.preserveCurrentOnFailure) {
+      setScanResult(null);
+    }
+    setScannerError("対象の参加者が見つかりません");
   }
 
   function handleManualLookup() {
@@ -920,6 +943,7 @@ export default function HomePage() {
   function clearCurrentParticipant() {
     setScanResult(null);
     setScanRaw("");
+    lastScannedParticipantIdRef.current = "";
     setStudentDiscount(false);
     setSelectedAdjustment(pricingConfig.adjustmentOptions[0]?.key || "none");
     setCustomReason("");
