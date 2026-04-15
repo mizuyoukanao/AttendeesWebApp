@@ -42,6 +42,8 @@ export async function POST(request: NextRequest) {
     });
 
     const response = NextResponse.json({ ok: true, tournamentId, mode: "operator_code" as const });
+    response.cookies.set("startgg_access_token", "", { path: "/", maxAge: 0 });
+    response.cookies.set("startgg_refresh_token", "", { path: "/", maxAge: 0 });
     setSessionCookie(response, session, 60 * 60 * 4);
     return response;
   } catch (error: any) {

@@ -157,8 +157,15 @@ const defaultSeatAssignmentConfig: SeatAssignmentConfig = {
 
 function parseParticipantIdFromQr(raw: string) {
   const trimmed = raw.trim();
-  const urlMatch = trimmed.match(/participant\/(\d+)\/qr/);
+  const urlMatch = trimmed.match(/participant\/(\d+)(?:\/qr)?/i);
   if (urlMatch?.[1]) return urlMatch[1];
+  try {
+    const parsed = new URL(trimmed);
+    const fromQuery = parsed.searchParams.get("participantId") || parsed.searchParams.get("participant_id");
+    if (fromQuery && /^\d+$/.test(fromQuery)) return fromQuery;
+  } catch {
+    // non-url value
+  }
   const digitsOnly = trimmed.match(/^\d+$/);
   return digitsOnly ? digitsOnly[0] : null;
 }
@@ -326,6 +333,7 @@ export default function HomePage() {
   const [editCheckedIn, setEditCheckedIn] = useState(false);
   const scannerContainerRef = useRef<HTMLDivElement>(null);
   const lostFoundScannerContainerRef = useRef<HTMLDivElement>(null);
+  const participantsRef = useRef<Participant[]>(initialParticipants);
   const lastScannedParticipantIdRef = useRef<string>("");
   const [authSession, setAuthSession] = useState<AuthSession>({ authenticated: false });
   const [accessCodeInput, setAccessCodeInput] = useState("");
@@ -344,6 +352,7 @@ export default function HomePage() {
   const [isMobileViewport, setIsMobileViewport] = useState(false);
   const compactKiosk = isMobileViewport;
   const hasOperatorAccess = Boolean(authSession.authenticated);
+  const isStartggAuthenticated = authSession.authenticated && authSession.session?.mode === "startgg";
   const activeAccessCode = issuedAccessCode;
   const shareUrl = typeof window !== "undefined" && activeAccessCode
     ? `${window.location.origin}${window.location.pathname}?tournamentId=${encodeURIComponent(tournamentId)}&code=${encodeURIComponent(activeAccessCode)}`
@@ -363,6 +372,10 @@ export default function HomePage() {
     const options = adjustmentOptions();
     return options.find((opt) => opt.key === editAdjustmentKey) ?? options[0];
   }, [editAdjustmentKey, pricingConfig]);
+
+  useEffect(() => {
+    participantsRef.current = participants;
+  }, [participants]);
 
   useEffect(() => {
     if (activeTab !== "kiosk" || !hasOperatorAccess) {
@@ -749,9 +762,7 @@ export default function HomePage() {
         throw new Error("大会IDの解決に失敗しました");
       }
       setTournamentId(resolvedTournamentId);
-      setManagedTournaments((prev) => (
-        prev.some((item) => item.id === resolvedTournamentId) ? prev : [...prev, { id: resolvedTournamentId, name: resolvedTournamentId }]
-      ));
+      setManagedTournaments([{ id: resolvedTournamentId, name: resolvedTournamentId }]);
       await refreshSession();
       setAccessCodeInput("");
       setAccessMessage("");
@@ -838,6 +849,8 @@ export default function HomePage() {
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     setAuthSession({ authenticated: false });
+    setManagedTournaments([]);
+    setTournamentId("demo-tournament");
     setTournamentMessage("");
     setTournamentError("");
   }
@@ -906,7 +919,7 @@ export default function HomePage() {
       return;
     }
 
-    const participant = participants.find((p) => p.participantId === participantId) || null;
+    const participant = participantsRef.current.find((p) => p.participantId === participantId) || null;
     if (participant) {
       setScanResult(participant);
       lastScannedParticipantIdRef.current = participantId;
@@ -931,7 +944,7 @@ export default function HomePage() {
       setLostFoundError("QRから参加者IDを取得できませんでした");
       return;
     }
-    const participant = participants.find((p) => p.participantId === participantId) || null;
+    const participant = participantsRef.current.find((p) => p.participantId === participantId) || null;
     setLostFoundResult(participant);
     setLostFoundError(participant ? "" : "対象の参加者が見つかりません");
   }
@@ -1543,8 +1556,8 @@ export default function HomePage() {
         </div>
       </header>
 
-      <div className="card">
-        <div className="section-title">start.gg 大会の選択</div>
+      <details className="card" open>
+        <summary className="section-title" style={{ cursor: "pointer" }}>start.gg 大会の選択</summary>
         <p className="muted">
           start.ggのアカウントでログイン後、マネージャー以上の権限を持つ大会を取得してチェックイン/CSVアップロード/ダッシュボードで使用する大会 ID を選択できます。
         </p>
@@ -1574,16 +1587,16 @@ export default function HomePage() {
           {tournamentMessage && <div className="toast success">{tournamentMessage}</div>}
           {tournamentError && <div className="toast danger">{tournamentError}</div>}
         </div>
-      </div>
+      </details>
 
       {activeTab === "kiosk" && (
         <div className={clsx("card-grid", { "kiosk-compact": compactKiosk })}>
-          <div className="card">
+          <details className="card" open>
+            <summary className="section-title" style={{ marginBottom: 8, cursor: "pointer" }}>QRスキャン</summary>
             <div className="flex-between" style={{ marginBottom: 8 }}>
-              <div className="section-title" style={{ marginBottom: 0 }}>QRスキャン</div>
+              <div className="muted">受付用スキャン</div>
             </div>
             {isMobileViewport && <div className="muted">スマホ表示のため簡易UIを自動適用しています。</div>}
-            <a className="button secondary" href="/api/auth/login" style={{ width: "100%", textAlign: "center" }}>start.gg ログイン</a>
             <label className="label" htmlFor="kiosk-tournament-select" style={{ marginTop: 8 }}>対象大会</label>
             <select
               id="kiosk-tournament-select"
@@ -1615,10 +1628,10 @@ export default function HomePage() {
               {scannerError && <span className="muted">{scannerError}</span>}
             </div>
             {kioskMessage && <div className="toast success" style={{ marginTop: 8 }}>{kioskMessage}</div>}
-          </div>
+          </details>
 
-          <div className={clsx("card", { "overlay-card": compactKiosk && scanResult })}>
-            <div className="section-title">参加者情報</div>
+          <details className={clsx("card", { "overlay-card": compactKiosk && scanResult })} open>
+            <summary className="section-title" style={{ cursor: "pointer" }}>参加者情報</summary>
             {scanResult ? (
               <div className="stack">
                 <div className="flex-between">
@@ -1701,14 +1714,14 @@ export default function HomePage() {
             ) : (
               <div className="muted">QRを読み取ると参加者情報が表示されます</div>
             )}
-          </div>
+          </details>
         </div>
       )}
 
       {activeTab === "lostFound" && (
         <div className="card-grid">
-          <div className="card">
-            <div className="section-title">遺失物QRスキャン</div>
+          <details className="card" open>
+            <summary className="section-title" style={{ cursor: "pointer" }}>遺失物QRスキャン</summary>
             <p className="muted">
               大会を選択した状態で、遺失物に付与されたQR（参加者チェックインQRと同形式）を読み取ると、持ち主と対戦台番号を表示します。
             </p>
@@ -1731,10 +1744,10 @@ export default function HomePage() {
               </button>
               {lostFoundError && <span className="muted">{lostFoundError}</span>}
             </div>
-          </div>
+          </details>
 
-          <div className="card">
-            <div className="section-title">照合結果</div>
+          <details className="card" open>
+            <summary className="section-title" style={{ cursor: "pointer" }}>照合結果</summary>
             {lostFoundResult ? (
               <div className="stack">
                 <div style={{ fontSize: 20, fontWeight: 800 }}>{getDisplayName(lostFoundResult)}</div>
@@ -1750,14 +1763,14 @@ export default function HomePage() {
             ) : (
               <div className="muted">QRを読み取ると、持ち主と対戦台番号が表示されます。</div>
             )}
-          </div>
+          </details>
         </div>
       )}
 
       {activeTab === "operator" && (
         <div className="card-grid">
-          <div className="card">
-            <div className="section-title">データベース リアルタイム同期</div>
+          <details className="card" open>
+            <summary className="section-title" style={{ cursor: "pointer" }}>データベース リアルタイム同期</summary>
             {firestoreReady ? (
               <div className="toast success">参加者データをリアルタイム同期中（{tournamentId}）</div>
             ) : (
@@ -1765,10 +1778,10 @@ export default function HomePage() {
             )}
             {firestoreError && <div className="toast danger">{firestoreError}</div>}
             <p className="muted">もしデータベースが正しく取得できない場合は、管理者にお問い合わせください。</p>
-          </div>
+          </details>
 
-          <div className="card">
-            <div className="section-title">大会ごとの料金設定（データベース保存）</div>
+          <details className="card" open>
+            <summary className="section-title" style={{ cursor: "pointer" }}>大会ごとの料金設定（データベース保存）</summary>
             <p className="muted">トーナメントごとに料金設定を保存・取得します。データベースに保存した設定がチェックイン時の金額計算に反映されます。</p>
             <div className="stack">
               <label className="label">選択中のトーナメントID</label>
@@ -1890,15 +1903,15 @@ export default function HomePage() {
               ))}
               <button className="button" type="button" onClick={addAdjustment} disabled={!authSession.authenticated}>オプションを追加</button>
             </div>
-          </div>
+          </details>
 
-          <div className="card">
-            <div className="section-title">start.gg ログイン</div>
+          <details className="card" open>
+            <summary className="section-title" style={{ cursor: "pointer" }}>start.gg ログイン</summary>
             <p className="muted">start.gg にリダイレクトします。</p>
             <div className="stack">
               <a className="button" href="/api/auth/login">start.gg でログイン</a>
               <div className="muted">ログイン後、マネージャー以上の権限がある大会のリストが有効化されます。</div>
-              {authSession.authenticated ? (
+              {isStartggAuthenticated ? (
                 <div className="toast success">
                   <div>
                     Startggアカウントでログイン済です。
@@ -1979,10 +1992,10 @@ export default function HomePage() {
               </div>
               {accessCodeAdminMessage && <div className="toast">{accessCodeAdminMessage}</div>}
             </div>
-          </div>
+          </details>
 
-          <div className="card">
-            <div className="section-title">参加者CSVアップロード</div>
+          <details className="card" open>
+            <summary className="section-title" style={{ cursor: "pointer" }}>参加者CSVアップロード</summary>
             <p className="muted">参加者情報をCSVから取得し、データベースへアップロードします。台番号を指定したい場合は「Admin Notes」、枠の分類は「Venue Fee Name」列を利用してください。</p>
             <input
               type="file"
@@ -2002,18 +2015,18 @@ export default function HomePage() {
             {operatorMessage && <div className="toast" style={{ marginTop: 8 }}>{operatorMessage}</div>}
             <div className="divider" />
             <div className="muted">個人情報はアップロード前に破棄されます。CSV再アップロード時はチェックイン/席情報を維持しつつupsertし、未検出参加者は即時削除せず候補としてマークします。</div>
-          </div>
+          </details>
         </div>
       )}
 
       {activeTab === "dashboard" && (
-        <div className="card">
-          <div className="section-title">チェックイン状況</div>
+        <details className="card" open>
+          <summary className="section-title" style={{ cursor: "pointer" }}>チェックイン状況</summary>
           {!hasOperatorAccess && <div className="toast">一覧の閲覧にはログインが必要です。</div>}
           {hasOperatorAccess && (
             <>
-          <div className="stack" style={{ marginBottom: 12 }}>
-            <div className="section-title" style={{ marginBottom: 0 }}>対戦台の一括割り当て</div>
+          <details className="stack" style={{ marginBottom: 12 }} open>
+            <summary className="section-title" style={{ marginBottom: 0, cursor: "pointer" }}>対戦台の一括割り当て</summary>
             <div className="muted">
               枠（Venue Fee Name）を選んで、フォーマットで台番号を自動生成して割り当てます。例: <code>{"{Alphabet:A:D}-{Int:1:4}"}</code> / 総人数は <code>{"{Count}"}</code> で参照できます。
             </div>
@@ -2079,68 +2092,70 @@ export default function HomePage() {
               対象人数: {assignmentTargets.length}名 / 生成プレビュー: {seatLabelPreview.length ? seatLabelPreview.join(", ") : "（未生成）"}
             </div>
             <div className="divider" />
-            <div className="section-title" style={{ marginBottom: 0 }}>チェックイン時の自動対戦台割り当て</div>
-            <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <details className="stack" open>
+              <summary className="section-title" style={{ marginBottom: 0, cursor: "pointer" }}>チェックイン時の自動対戦台割り当て</summary>
+              <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={seatAssignmentConfig.autoOnCheckin.enabled}
+                  onChange={(e) => setSeatAssignmentConfig((prev) => ({
+                    ...prev,
+                    autoOnCheckin: { ...prev.autoOnCheckin, enabled: e.target.checked },
+                  }))}
+                  disabled={!authSession.authenticated}
+                />
+                チェックイン時に自動で対戦台を割り当てる
+              </label>
+              <div className="flex" style={{ flexWrap: "wrap", gap: 8 }}>
+                {venueFeeOptions.map((name) => (
+                  <label key={`auto-${name}`} className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <input
+                      type="checkbox"
+                      checked={seatAssignmentConfig.autoOnCheckin.venueFeeNames.includes(name)}
+                      onChange={() => toggleAssignmentVenueFee(name, "autoOnCheckin")}
+                      disabled={!authSession.authenticated}
+                    />
+                    {name}
+                  </label>
+                ))}
+              </div>
               <input
-                type="checkbox"
-                checked={seatAssignmentConfig.autoOnCheckin.enabled}
+                className="input"
+                value={seatAssignmentConfig.autoOnCheckin.pattern}
                 onChange={(e) => setSeatAssignmentConfig((prev) => ({
                   ...prev,
-                  autoOnCheckin: { ...prev.autoOnCheckin, enabled: e.target.checked },
+                  autoOnCheckin: { ...prev.autoOnCheckin, pattern: e.target.value },
                 }))}
+                placeholder="{Alphabet:A:D}-{Int:1:4}"
                 disabled={!authSession.authenticated}
               />
-              チェックイン時に自動で対戦台を割り当てる
-            </label>
-            <div className="flex" style={{ flexWrap: "wrap", gap: 8 }}>
-              {venueFeeOptions.map((name) => (
-                <label key={`auto-${name}`} className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <input
-                    type="checkbox"
-                    checked={seatAssignmentConfig.autoOnCheckin.venueFeeNames.includes(name)}
-                    onChange={() => toggleAssignmentVenueFee(name, "autoOnCheckin")}
-                    disabled={!authSession.authenticated}
-                  />
-                  {name}
-                </label>
-              ))}
-            </div>
-            <input
-              className="input"
-              value={seatAssignmentConfig.autoOnCheckin.pattern}
-              onChange={(e) => setSeatAssignmentConfig((prev) => ({
-                ...prev,
-                autoOnCheckin: { ...prev.autoOnCheckin, pattern: e.target.value },
-              }))}
-              placeholder="{Alphabet:A:D}-{Int:1:4}"
-              disabled={!authSession.authenticated}
-            />
-            <input
-              className="input"
-              list="player-name-suggestions-auto"
-              value={seatAssignmentConfig.autoOnCheckin.exceptionPlayerNames.join(", ")}
-              onChange={(e) => setSeatAssignmentConfig((prev) => ({
-                ...prev,
-                autoOnCheckin: { ...prev.autoOnCheckin, exceptionPlayerNames: parseCsvList(e.target.value) },
-              }))}
-              placeholder="自動割り当てで予備台にするプレイヤー名（カンマ or 改行区切り）"
-              disabled={!authSession.authenticated}
-            />
-            <datalist id="player-name-suggestions-auto">
-              {playerNameOptions.map((name) => (
-                <option key={`auto-name-${name}`} value={name} />
-              ))}
-            </datalist>
-            <input
-              className="input"
-              value={seatAssignmentConfig.autoOnCheckin.reserveLabelPrefix}
-              onChange={(e) => setSeatAssignmentConfig((prev) => ({
-                ...prev,
-                autoOnCheckin: { ...prev.autoOnCheckin, reserveLabelPrefix: e.target.value },
-              }))}
-              placeholder="予備台"
-              disabled={!authSession.authenticated}
-            />
+              <input
+                className="input"
+                list="player-name-suggestions-auto"
+                value={seatAssignmentConfig.autoOnCheckin.exceptionPlayerNames.join(", ")}
+                onChange={(e) => setSeatAssignmentConfig((prev) => ({
+                  ...prev,
+                  autoOnCheckin: { ...prev.autoOnCheckin, exceptionPlayerNames: parseCsvList(e.target.value) },
+                }))}
+                placeholder="自動割り当てで予備台にするプレイヤー名（カンマ or 改行区切り）"
+                disabled={!authSession.authenticated}
+              />
+              <datalist id="player-name-suggestions-auto">
+                {playerNameOptions.map((name) => (
+                  <option key={`auto-name-${name}`} value={name} />
+                ))}
+              </datalist>
+              <input
+                className="input"
+                value={seatAssignmentConfig.autoOnCheckin.reserveLabelPrefix}
+                onChange={(e) => setSeatAssignmentConfig((prev) => ({
+                  ...prev,
+                  autoOnCheckin: { ...prev.autoOnCheckin, reserveLabelPrefix: e.target.value },
+                }))}
+                placeholder="予備台"
+                disabled={!authSession.authenticated}
+              />
+            </details>
             <div className="flex" style={{ gap: 8, flexWrap: "wrap" }}>
               <button className="button secondary" type="button" onClick={saveSeatAssignmentConfig} disabled={assignmentSaving || !authSession.authenticated}>
                 {assignmentSaving ? "保存中..." : "台番号設定を保存"}
@@ -2150,9 +2165,11 @@ export default function HomePage() {
               </button>
             </div>
             {assignmentMessage && <div className="toast">{assignmentMessage}</div>}
-          </div>
+          </details>
 
-          <div className="flex" style={{ marginBottom: 12 }}>
+          <details open>
+            <summary className="section-title" style={{ cursor: "pointer" }}>参加者一覧・検索</summary>
+            <div className="flex" style={{ marginBottom: 12 }}>
             <input
               className="input"
               placeholder="ID または プレイヤー名で検索"
@@ -2176,93 +2193,94 @@ export default function HomePage() {
               <option value="nameAsc">名前昇順</option>
               <option value="nameDesc">名前降順</option>
             </select>
-          </div>
+            </div>
 
-          {isMobileViewport ? (
-            <div className="stack" style={{ gap: 10 }}>
-              {filteredParticipants.map((p) => {
-                const status = computePaymentStatus(
-                  p,
-                  false,
-                  { key: "none", label: "変更なし", deltaAmount: 0, requiresReason: false },
-                  0,
-                  pricingConfig,
-                );
-                return (
-                  <div key={p.participantId} className="card" style={{ background: "#0d1117" }}>
-                    <div className="flex-between">
-                      <strong>{getDisplayName(p)}</strong>
-                      <span className={clsx("status", status.status === "prepaid" ? "success" : "danger")}>{status.label}</span>
+            {isMobileViewport ? (
+              <div className="stack" style={{ gap: 10 }}>
+                {filteredParticipants.map((p) => {
+                  const status = computePaymentStatus(
+                    p,
+                    false,
+                    { key: "none", label: "変更なし", deltaAmount: 0, requiresReason: false },
+                    0,
+                    pricingConfig,
+                  );
+                  return (
+                    <div key={p.participantId} className="card" style={{ background: "#0d1117" }}>
+                      <div className="flex-between">
+                        <strong>{getDisplayName(p)}</strong>
+                        <span className={clsx("status", status.status === "prepaid" ? "success" : "danger")}>{status.label}</span>
+                      </div>
+                      <div className="muted">ID: {p.participantId}</div>
+                      <div className="muted">枠: {p.venueFeeName || "-"}</div>
+                      <div className="muted">台番号: {p.adminNotes || "-"}</div>
+                      <div className="muted">チェックイン: {p.checkedIn ? formatTimestampJst(new Date(p.checkedInAt || "")) : "未"}</div>
+                      <button className="button secondary" type="button" onClick={() => openParticipantEditor(p)}>編集</button>
                     </div>
-                    <div className="muted">ID: {p.participantId}</div>
-                    <div className="muted">枠: {p.venueFeeName || "-"}</div>
-                    <div className="muted">台番号: {p.adminNotes || "-"}</div>
-                    <div className="muted">チェックイン: {p.checkedIn ? formatTimestampJst(new Date(p.checkedInAt || "")) : "未"}</div>
-                    <button className="button secondary" type="button" onClick={() => openParticipantEditor(p)}>編集</button>
-                  </div>
-                );
-              })}
-              {filteredParticipants.length === 0 && <div className="muted">該当データがありません</div>}
-            </div>
-          ) : (
-            <div className="table-container">
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>ID</th>
-                    <th>プレイヤー名</th>
-                    <th>枠</th>
-                    <th>台番号</th>
-                    <th>支払い</th>
-                    <th>チェックイン</th>
-                    <th>操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredParticipants.map((p) => {
-                    const status = computePaymentStatus(
-                      p,
-                      false,
-                      { key: "none", label: "変更なし", deltaAmount: 0, requiresReason: false },
-                      0,
-                      pricingConfig,
-                    );
-                    return (
-                      <tr key={p.participantId}>
-                        <td>{p.participantId}</td>
-                        <td>{getDisplayName(p)}</td>
-                        <td>{p.venueFeeName || "-"}</td>
-                        <td>{p.adminNotes || "-"}</td>
-                        <td>
-                          <span className={clsx("status", status.status === "prepaid" ? "success" : "danger")}>{status.label}</span>
-                        </td>
-                        <td>{p.checkedIn ? formatTimestampJst(new Date(p.checkedInAt || "")) : "未"}</td>
-                        <td>
-                          <button
-                            className="button secondary"
-                            type="button"
-                            onClick={() => {
-                              openParticipantEditor(p);
-                            }}
-                          >
-                            編集
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {filteredParticipants.length === 0 && (
+                  );
+                })}
+                {filteredParticipants.length === 0 && <div className="muted">該当データがありません</div>}
+              </div>
+            ) : (
+              <div className="table-container">
+                <table className="table">
+                  <thead>
                     <tr>
-                      <td colSpan={8} className="muted">該当データがありません</td>
+                      <th>ID</th>
+                      <th>プレイヤー名</th>
+                      <th>枠</th>
+                      <th>台番号</th>
+                      <th>支払い</th>
+                      <th>チェックイン</th>
+                      <th>操作</th>
                     </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          )}
+                  </thead>
+                  <tbody>
+                    {filteredParticipants.map((p) => {
+                      const status = computePaymentStatus(
+                        p,
+                        false,
+                        { key: "none", label: "変更なし", deltaAmount: 0, requiresReason: false },
+                        0,
+                        pricingConfig,
+                      );
+                      return (
+                        <tr key={p.participantId}>
+                          <td>{p.participantId}</td>
+                          <td>{getDisplayName(p)}</td>
+                          <td>{p.venueFeeName || "-"}</td>
+                          <td>{p.adminNotes || "-"}</td>
+                          <td>
+                            <span className={clsx("status", status.status === "prepaid" ? "success" : "danger")}>{status.label}</span>
+                          </td>
+                          <td>{p.checkedIn ? formatTimestampJst(new Date(p.checkedInAt || "")) : "未"}</td>
+                          <td>
+                            <button
+                              className="button secondary"
+                              type="button"
+                              onClick={() => {
+                                openParticipantEditor(p);
+                              }}
+                            >
+                              編集
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {filteredParticipants.length === 0 && (
+                      <tr>
+                        <td colSpan={8} className="muted">該当データがありません</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </details>
             </>
           )}
-        </div>
+        </details>
       )}
       {participantEditor}
       {accessOverlay}
