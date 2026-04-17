@@ -82,6 +82,10 @@ type Participant = {
   seatLabel?: string;
 };
 
+type ParticipantPatchChange =
+  | { type: "upsert"; participant: Participant }
+  | { type: "remove"; participantId: string };
+
 type AuthSession = {
   authenticated: boolean;
   user?: {
@@ -214,6 +218,33 @@ function formatTimestampJst(date: Date) {
   const hh = `${local.getUTCHours()}`.padStart(2, "0");
   const min = `${local.getUTCMinutes()}`.padStart(2, "0");
   return `${yyyy}-${mm}-${dd} ${hh}:${min} JST`;
+}
+
+function sortParticipantsById(input: Participant[]) {
+  return [...input].sort((a, b) => a.participantId.localeCompare(b.participantId, "en", { numeric: true }));
+}
+
+function applyParticipantSnapshot(payload: any): Participant[] {
+  const next = Array.isArray(payload?.participants) ? payload.participants : [];
+  return sortParticipantsById(next as Participant[]);
+}
+
+function applyParticipantPatch(current: Participant[], payload: any): Participant[] {
+  const changes = Array.isArray(payload?.changes) ? payload.changes : [];
+  if (!changes.length) return current;
+
+  const map = new Map(current.map((participant) => [participant.participantId, participant]));
+  for (const raw of changes as ParticipantPatchChange[]) {
+    if (raw?.type === "remove") {
+      const participantId = String(raw?.participantId || "").trim();
+      if (participantId) map.delete(participantId);
+      continue;
+    }
+    if (raw?.type === "upsert" && raw.participant?.participantId) {
+      map.set(String(raw.participant.participantId), raw.participant);
+    }
+  }
+  return sortParticipantsById(Array.from(map.values()));
 }
 
 function describeTournament(t: ManagedTournament) {
@@ -545,37 +576,44 @@ export default function HomePage() {
     }
 
     let closed = false;
+    let lastFallbackFetchAt = 0;
     const streamUrl = `/api/tournaments/${encodeURIComponent(tournamentId)}/participants/stream`;
     const source = new EventSource(streamUrl, { withCredentials: true });
 
-    const applyPayload = (payload: any) => {
-      const next = Array.isArray(payload?.participants) ? payload.participants : [];
-      setParticipants(next as Participant[]);
+    const markHealthy = () => {
       setFirestoreReady(true);
       setFirestoreError("");
     };
 
     const snapshotEventHandler = (event: MessageEvent) => {
       try {
-        applyPayload(JSON.parse(event.data));
+        setParticipants(applyParticipantSnapshot(JSON.parse(event.data)));
+        markHealthy();
       } catch {
         setFirestoreError("参加者データの受信に失敗しました");
       }
     };
 
-    const onUpdateEvent = (event: MessageEvent) => {
+    const onPatchEvent = (event: MessageEvent) => {
       try {
-        applyPayload(JSON.parse(event.data));
+        const payload = JSON.parse(event.data);
+        setParticipants((current) => applyParticipantPatch(current, payload));
+        markHealthy();
       } catch {
         setFirestoreError("参加者更新の反映に失敗しました");
       }
     };
 
     source.addEventListener("snapshot", snapshotEventHandler);
-    source.addEventListener("update", onUpdateEvent);
+    source.addEventListener("patch", onPatchEvent);
 
     source.onerror = async () => {
       if (closed) return;
+      const now = Date.now();
+      if (now - lastFallbackFetchAt < 3000) {
+        return;
+      }
+      lastFallbackFetchAt = now;
       setFirestoreError("リアルタイム接続が不安定です。通常取得にフォールバックします。");
       try {
         await fetchParticipantsSnapshot(tournamentId);
@@ -589,7 +627,7 @@ export default function HomePage() {
     return () => {
       closed = true;
       source.removeEventListener("snapshot", snapshotEventHandler);
-      source.removeEventListener("update", onUpdateEvent);
+      source.removeEventListener("patch", onPatchEvent);
       source.close();
     };
   }, [tournamentId, hasOperatorAccess]);
