@@ -82,6 +82,10 @@ type Participant = {
   seatLabel?: string;
 };
 
+type ParticipantPatchChange =
+  | { type: "upsert"; participant: Participant }
+  | { type: "remove"; participantId: string };
+
 type AuthSession = {
   authenticated: boolean;
   user?: {
@@ -216,6 +220,33 @@ function formatTimestampJst(date: Date) {
   return `${yyyy}-${mm}-${dd} ${hh}:${min} JST`;
 }
 
+function sortParticipantsById(input: Participant[]) {
+  return [...input].sort((a, b) => a.participantId.localeCompare(b.participantId, "en", { numeric: true }));
+}
+
+function applyParticipantSnapshot(payload: any): Participant[] {
+  const next = Array.isArray(payload?.participants) ? payload.participants : [];
+  return sortParticipantsById(next as Participant[]);
+}
+
+function applyParticipantPatch(current: Participant[], payload: any): Participant[] {
+  const changes = Array.isArray(payload?.changes) ? payload.changes : [];
+  if (!changes.length) return current;
+
+  const map = new Map(current.map((participant) => [participant.participantId, participant]));
+  for (const raw of changes as ParticipantPatchChange[]) {
+    if (raw?.type === "remove") {
+      const participantId = String(raw?.participantId || "").trim();
+      if (participantId) map.delete(participantId);
+      continue;
+    }
+    if (raw?.type === "upsert" && raw.participant?.participantId) {
+      map.set(String(raw.participant.participantId), raw.participant);
+    }
+  }
+  return sortParticipantsById(Array.from(map.values()));
+}
+
 function describeTournament(t: ManagedTournament) {
   const location = [t.city, t.addrState, t.countryCode].filter(Boolean).join(" / ");
   const startDate = t.startAt ? new Date(t.startAt * 1000).toLocaleDateString("ja-JP") : "";
@@ -307,7 +338,7 @@ export default function HomePage() {
   const [scanRaw, setScanRaw] = useState("");
   const [scannerError, setScannerError] = useState("");
   const [studentDiscount, setStudentDiscount] = useState(false);
-  const [selectedAdjustment, setSelectedAdjustment] = useState(defaultPricingConfig.adjustmentOptions[0].key);
+  const [selectedAdjustments, setSelectedAdjustments] = useState<string[]>([defaultPricingConfig.adjustmentOptions[0].key]);
   const [customReason, setCustomReason] = useState("");
   const [customAmount, setCustomAmount] = useState(0);
   const [operatorMessage, setOperatorMessage] = useState("");
@@ -327,10 +358,22 @@ export default function HomePage() {
   const [overwriteSeatAssignment, setOverwriteSeatAssignment] = useState(false);
   const [editingParticipant, setEditingParticipant] = useState<Participant | null>(null);
   const [editAdminNotes, setEditAdminNotes] = useState("");
-  const [editAdjustmentKey, setEditAdjustmentKey] = useState(defaultPricingConfig.adjustmentOptions[0].key);
+  const [editVenueFeeName, setEditVenueFeeName] = useState("");
+  const [editAdjustmentKeys, setEditAdjustmentKeys] = useState<string[]>([defaultPricingConfig.adjustmentOptions[0].key]);
   const [editCustomReason, setEditCustomReason] = useState("");
   const [editCustomAmount, setEditCustomAmount] = useState(0);
   const [editCheckedIn, setEditCheckedIn] = useState(false);
+  const [manualEntryName, setManualEntryName] = useState("");
+  const [manualEntryVenueFee, setManualEntryVenueFee] = useState("");
+  const [manualEntryFeeType, setManualEntryFeeType] = useState<"general" | "bring" | "student" | "free" | "custom">("general");
+  const [manualEntryCustomFee, setManualEntryCustomFee] = useState(0);
+  const [manualSelectedAdjustments, setManualSelectedAdjustments] = useState<string[]>([defaultPricingConfig.adjustmentOptions[0].key]);
+  const [manualCustomReason, setManualCustomReason] = useState("");
+  const [manualCustomAmount, setManualCustomAmount] = useState(0);
+  const [manualEntryMessage, setManualEntryMessage] = useState("");
+  const [isManualEntrySubmitting, setIsManualEntrySubmitting] = useState(false);
+  const [venueFeeCatalog, setVenueFeeCatalog] = useState<string[]>([]);
+  const [newVenueFeeName, setNewVenueFeeName] = useState("");
   const scannerContainerRef = useRef<HTMLDivElement>(null);
   const lostFoundScannerContainerRef = useRef<HTMLDivElement>(null);
   const participantsRef = useRef<Participant[]>(initialParticipants);
@@ -361,17 +404,18 @@ export default function HomePage() {
     ? `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(shareUrl)}`
     : "";
 
-  const adjustmentOption = useMemo(
-    () => {
-      const options = adjustmentOptions();
-      return options.find((opt) => opt.key === selectedAdjustment) ?? options[0];
-    },
-    [selectedAdjustment, pricingConfig],
+  const selectedAdjustmentOptions = useMemo(
+    () => adjustmentOptions().filter((opt) => selectedAdjustments.includes(opt.key)),
+    [selectedAdjustments, pricingConfig],
   );
-  const editAdjustmentOption = useMemo(() => {
-    const options = adjustmentOptions();
-    return options.find((opt) => opt.key === editAdjustmentKey) ?? options[0];
-  }, [editAdjustmentKey, pricingConfig]);
+  const editAdjustmentOptions = useMemo(
+    () => adjustmentOptions().filter((opt) => editAdjustmentKeys.includes(opt.key)),
+    [editAdjustmentKeys, pricingConfig],
+  );
+  const manualAdjustmentOptions = useMemo(
+    () => adjustmentOptions().filter((opt) => manualSelectedAdjustments.includes(opt.key)),
+    [manualSelectedAdjustments, pricingConfig],
+  );
 
   useEffect(() => {
     participantsRef.current = participants;
@@ -532,37 +576,44 @@ export default function HomePage() {
     }
 
     let closed = false;
+    let lastFallbackFetchAt = 0;
     const streamUrl = `/api/tournaments/${encodeURIComponent(tournamentId)}/participants/stream`;
     const source = new EventSource(streamUrl, { withCredentials: true });
 
-    const applyPayload = (payload: any) => {
-      const next = Array.isArray(payload?.participants) ? payload.participants : [];
-      setParticipants(next as Participant[]);
+    const markHealthy = () => {
       setFirestoreReady(true);
       setFirestoreError("");
     };
 
     const snapshotEventHandler = (event: MessageEvent) => {
       try {
-        applyPayload(JSON.parse(event.data));
+        setParticipants(applyParticipantSnapshot(JSON.parse(event.data)));
+        markHealthy();
       } catch {
         setFirestoreError("参加者データの受信に失敗しました");
       }
     };
 
-    const onUpdateEvent = (event: MessageEvent) => {
+    const onPatchEvent = (event: MessageEvent) => {
       try {
-        applyPayload(JSON.parse(event.data));
+        const payload = JSON.parse(event.data);
+        setParticipants((current) => applyParticipantPatch(current, payload));
+        markHealthy();
       } catch {
         setFirestoreError("参加者更新の反映に失敗しました");
       }
     };
 
     source.addEventListener("snapshot", snapshotEventHandler);
-    source.addEventListener("update", onUpdateEvent);
+    source.addEventListener("patch", onPatchEvent);
 
     source.onerror = async () => {
       if (closed) return;
+      const now = Date.now();
+      if (now - lastFallbackFetchAt < 3000) {
+        return;
+      }
+      lastFallbackFetchAt = now;
       setFirestoreError("リアルタイム接続が不安定です。通常取得にフォールバックします。");
       try {
         await fetchParticipantsSnapshot(tournamentId);
@@ -576,20 +627,44 @@ export default function HomePage() {
     return () => {
       closed = true;
       source.removeEventListener("snapshot", snapshotEventHandler);
-      source.removeEventListener("update", onUpdateEvent);
+      source.removeEventListener("patch", onPatchEvent);
       source.close();
     };
   }, [tournamentId, hasOperatorAccess]);
 
   useEffect(() => {
-    const exists = pricingConfig.adjustmentOptions.some((opt) => opt.key === selectedAdjustment);
-    if (!exists && pricingConfig.adjustmentOptions[0]) {
-      setSelectedAdjustment(pricingConfig.adjustmentOptions[0].key);
-    }
-  }, [pricingConfig, selectedAdjustment]);
+    const available = new Set(pricingConfig.adjustmentOptions.map((opt) => opt.key));
+    const fallback = pricingConfig.adjustmentOptions[0]?.key || "none";
+    setSelectedAdjustments((prev) => {
+      const filtered = prev.filter((key) => available.has(key));
+      return filtered.length ? filtered : [fallback];
+    });
+    setEditAdjustmentKeys((prev) => {
+      const filtered = prev.filter((key) => available.has(key));
+      return filtered.length ? filtered : [fallback];
+    });
+    setManualSelectedAdjustments((prev) => {
+      const filtered = prev.filter((key) => available.has(key));
+      return filtered.length ? filtered : [fallback];
+    });
+  }, [pricingConfig]);
 
   function adjustmentOptions(): AdjustmentOption[] {
     return pricingConfig.adjustmentOptions;
+  }
+
+  function toggleAdjustment(
+    key: string,
+    setter: React.Dispatch<React.SetStateAction<string[]>>,
+  ) {
+    setter((prev) => {
+      const exists = prev.includes(key);
+      if (key === "none") {
+        return exists ? [key] : ["none"];
+      }
+      const next = exists ? prev.filter((item) => item !== key) : [...prev.filter((item) => item !== "none"), key];
+      return next.length ? next : ["none"];
+    });
   }
 
   async function loadPricingConfig(targetId: string) {
@@ -602,7 +677,7 @@ export default function HomePage() {
       setPricingConfig(config);
       setPricingSource(data.source || "firestore");
       setPricingName(data.name || "");
-      setSelectedAdjustment((config.adjustmentOptions[0]?.key) || "none");
+      setSelectedAdjustments([(config.adjustmentOptions[0]?.key) || "none"]);
       setPricingMessage(`料金設定を読み込みました`);
     } catch (error: any) {
       setPricingConfig(defaultPricingConfig);
@@ -629,6 +704,7 @@ export default function HomePage() {
           enabled: Boolean(config?.autoOnCheckin?.enabled),
         },
       });
+      setVenueFeeCatalog(Array.isArray(data?.venueFeeCatalog) ? data.venueFeeCatalog : []);
     } catch (error: any) {
       setAssignmentMessage(`台番号設定の取得に失敗しました: ${error?.message || "unknown"}`);
     }
@@ -649,7 +725,7 @@ export default function HomePage() {
       const res = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/seat-assignment`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ seatAssignmentConfig }),
+        body: JSON.stringify({ seatAssignmentConfig, venueFeeCatalog }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || res.statusText);
@@ -958,12 +1034,13 @@ export default function HomePage() {
     setScanRaw("");
     lastScannedParticipantIdRef.current = "";
     setStudentDiscount(false);
-    setSelectedAdjustment(pricingConfig.adjustmentOptions[0]?.key || "none");
+    setSelectedAdjustments([pricingConfig.adjustmentOptions[0]?.key || "none"]);
     setCustomReason("");
     setCustomAmount(0);
     setEditingParticipant(null);
     setEditAdminNotes("");
-    setEditAdjustmentKey(pricingConfig.adjustmentOptions[0]?.key || "none");
+    setEditVenueFeeName("");
+    setEditAdjustmentKeys([pricingConfig.adjustmentOptions[0]?.key || "none"]);
     setEditCustomReason("");
     setEditCustomAmount(0);
     setEditCheckedIn(false);
@@ -972,7 +1049,8 @@ export default function HomePage() {
   function openParticipantEditor(target: Participant) {
     setEditingParticipant(target);
     setEditAdminNotes(target.adminNotes || "");
-    setEditAdjustmentKey(pricingConfig.adjustmentOptions[0]?.key || "none");
+    setEditVenueFeeName(target.venueFeeName || "");
+    setEditAdjustmentKeys([pricingConfig.adjustmentOptions[0]?.key || "none"]);
     setEditCustomReason("");
     setEditCustomAmount(0);
     setEditCheckedIn(target.checkedIn);
@@ -990,8 +1068,10 @@ export default function HomePage() {
       return;
     }
 
-    const delta = adjustmentOption.key === "other" ? customAmount : adjustmentOption.deltaAmount;
-    const reasonLabel = adjustmentOption.key === "other" ? `その他: ${customReason}` : adjustmentOption.label;
+    const delta = selectedAdjustmentOptions.reduce((sum, opt) => sum + (opt.key === "other" ? customAmount : opt.deltaAmount), 0);
+    const reasonLabel = selectedAdjustmentOptions.map((opt) => (
+      opt.key === "other" ? `その他: ${customReason}` : opt.label
+    )).join(" / ") || "変更なし";
 
     try {
       const participantExists = participants.some((p) => p.participantId === scanResult.participantId);
@@ -1010,7 +1090,7 @@ export default function HomePage() {
             deltaAmount: delta,
             reasonLabel,
             requestId: crypto.randomUUID(),
-            requiresReason: Boolean(adjustmentOption?.requiresReason),
+            requiresReason: selectedAdjustmentOptions.some((opt) => opt.requiresReason),
           }),
         },
       );
@@ -1044,10 +1124,10 @@ export default function HomePage() {
       setKioskMessage(msg);
       return;
     }
-    const delta = editAdjustmentOption?.key === "other" ? editCustomAmount : (editAdjustmentOption?.deltaAmount ?? 0);
-    const reasonLabel = editAdjustmentOption?.key === "other"
-      ? `その他: ${editCustomReason || "編集"}`
-      : (editAdjustmentOption?.label || "変更なし");
+    const delta = editAdjustmentOptions.reduce((sum, opt) => sum + (opt.key === "other" ? editCustomAmount : opt.deltaAmount), 0);
+    const reasonLabel = editAdjustmentOptions.map((opt) => (
+      opt.key === "other" ? `その他: ${editCustomReason || "編集"}` : opt.label
+    )).join(" / ") || "変更なし";
 
     try {
       const res = await fetch(
@@ -1059,20 +1139,22 @@ export default function HomePage() {
           },
           body: JSON.stringify({
             adminNotes: editAdminNotes,
+            venueFeeName: editVenueFeeName,
             deltaAmount: delta,
             reasonLabel,
             requestId: crypto.randomUUID(),
             resetCheckIn,
             checkedIn: editCheckedIn,
-            requiresReason: Boolean(editAdjustmentOption?.requiresReason),
+            requiresReason: editAdjustmentOptions.some((opt) => opt.requiresReason),
           }),
         },
       );
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || res.statusText);
+      const seatSuffix = data?.assignedSeat ? `（対戦台: ${data.assignedSeat}）` : "";
       const msg = resetCheckIn
         ? `${getDisplayName(target)} を未チェックインに戻しました`
-        : `${getDisplayName(target)} の情報を更新しました`;
+        : `${getDisplayName(target)} の情報を更新しました${seatSuffix}`;
       setOperatorMessage(msg);
       setKioskMessage(msg);
       setEditingParticipant(null);
@@ -1107,6 +1189,88 @@ export default function HomePage() {
       .split(/[\n,]/)
       .map((v) => v.trim())
       .filter(Boolean);
+  }
+
+  function getManualBaseAmount() {
+    if (manualEntryFeeType === "general") return pricingConfig.generalFee;
+    if (manualEntryFeeType === "bring") return pricingConfig.bringConsoleFee;
+    if (manualEntryFeeType === "student") return pricingConfig.studentFixedFee;
+    if (manualEntryFeeType === "free") return 0;
+    return manualEntryCustomFee;
+  }
+
+  async function handleManualEntryCheckIn() {
+    if (!hasOperatorAccess) {
+      setManualEntryMessage("追加エントリーには start.gg ログインまたは大会固有コード認証が必要です");
+      return;
+    }
+    if (!tournamentId) {
+      setManualEntryMessage("大会を選択してください");
+      return;
+    }
+    if (!manualEntryName.trim() || !manualEntryVenueFee.trim()) {
+      setManualEntryMessage("参加者名と枠を入力してください");
+      return;
+    }
+    if (manualAdjustmentOptions.some((opt) => opt.requiresReason) && (!manualCustomReason.trim() || manualCustomAmount === 0)) {
+      setManualEntryMessage("「その他」選択時は理由と増減金額が必要です");
+      return;
+    }
+
+    setIsManualEntrySubmitting(true);
+    setManualEntryMessage("追加エントリーを登録中...");
+    try {
+      const createRes = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/participants/manual-entry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          playerName: manualEntryName.trim(),
+          venueFeeName: manualEntryVenueFee.trim(),
+          baseAmount: getManualBaseAmount(),
+        }),
+      });
+      const createData = await createRes.json();
+      if (!createRes.ok) throw new Error(createData?.error || createRes.statusText);
+      const createdParticipantId = createData?.participant?.participantId;
+      if (!createdParticipantId) throw new Error("参加者IDの生成に失敗しました");
+
+      const deltaAmount = manualAdjustmentOptions.reduce(
+        (sum, opt) => sum + (opt.key === "other" ? manualCustomAmount : opt.deltaAmount),
+        0,
+      );
+      const reasonLabel = manualAdjustmentOptions.map((opt) => (
+        opt.key === "other" ? `その他: ${manualCustomReason}` : opt.label
+      )).join(" / ") || "変更なし";
+
+      const checkinRes = await fetch(
+        `/api/tournaments/${encodeURIComponent(tournamentId)}/participants/${encodeURIComponent(createdParticipantId)}/checkin`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            deltaAmount,
+            reasonLabel,
+            requestId: crypto.randomUUID(),
+            requiresReason: manualAdjustmentOptions.some((opt) => opt.requiresReason),
+          }),
+        },
+      );
+      const checkinData = await checkinRes.json();
+      if (!checkinRes.ok) throw new Error(checkinData?.error || checkinRes.statusText);
+      const seatSuffix = checkinData?.assignedSeat ? `（対戦台: ${checkinData.assignedSeat}）` : "";
+      setManualEntryMessage(`${manualEntryName.trim()} を追加エントリーでチェックインしました${seatSuffix}`);
+      setManualEntryName("");
+      setManualEntryVenueFee("");
+      setManualEntryFeeType("general");
+      setManualEntryCustomFee(0);
+      setManualSelectedAdjustments([pricingConfig.adjustmentOptions[0]?.key || "none"]);
+      setManualCustomReason("");
+      setManualCustomAmount(0);
+    } catch (error: any) {
+      setManualEntryMessage(`追加エントリーに失敗しました: ${error?.message || "unknown"}`);
+    } finally {
+      setIsManualEntrySubmitting(false);
+    }
   }
 
   async function assignSeatsByPattern() {
@@ -1321,8 +1485,13 @@ export default function HomePage() {
   }
 
   const venueFeeOptions = useMemo(
-    () => Array.from(new Set(participants.map((p) => (p.venueFeeName || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, "ja")),
-    [participants],
+    () => Array.from(
+      new Set([
+        ...venueFeeCatalog,
+        ...participants.map((p) => (p.venueFeeName || "").trim()).filter(Boolean),
+      ]),
+    ).sort((a, b) => a.localeCompare(b, "ja")),
+    [participants, venueFeeCatalog],
   );
   const playerNameOptions = useMemo(
     () => Array.from(new Set(participants.map((p) => getDisplayName(p).trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, "ja")),
@@ -1345,6 +1514,15 @@ export default function HomePage() {
       setVenueFeeFilter("all");
     }
   }, [venueFeeOptions, venueFeeFilter]);
+
+  useEffect(() => {
+    if (!manualEntryVenueFee && venueFeeOptions[0]) {
+      setManualEntryVenueFee(venueFeeOptions[0]);
+    }
+    if (editingParticipant && !editVenueFeeName && editingParticipant.venueFeeName) {
+      setEditVenueFeeName(editingParticipant.venueFeeName);
+    }
+  }, [venueFeeOptions, manualEntryVenueFee, editVenueFeeName, editingParticipant]);
 
   const filteredParticipants = useMemo(() => {
     const filtered = participants.filter((p) => {
@@ -1379,14 +1557,22 @@ export default function HomePage() {
   );
 
   const paymentStatus = scanResult
-    ? computePaymentStatus(scanResult, studentDiscount, adjustmentOption, customAmount, pricingConfig)
+    ? (() => {
+      const baseDue = scanResult.payment.totalTransaction !== 0 ? 0 : scanResult.payment.totalOwed;
+      const studentDue = studentDiscount ? pricingConfig.studentFixedFee : baseDue;
+      const delta = selectedAdjustmentOptions.reduce((sum, opt) => sum + (opt.key === "other" ? customAmount : opt.deltaAmount), 0);
+      const amount = studentDue + delta;
+      if (amount > 0) return { status: "due", amount, label: `${amount.toLocaleString()}円 支払` } as PaymentStatus;
+      if (amount < 0) return { status: "refund", amount: Math.abs(amount), label: `${Math.abs(amount).toLocaleString()}円 返金` } as PaymentStatus;
+      return { status: "prepaid", amount: 0, label: "支払い不要" } as PaymentStatus;
+    })()
     : null;
 
   const disableSubmit = !tournamentId || !scanResult || scanResult.checkedIn ||
     !hasOperatorAccess ||
-    (adjustmentOption.requiresReason && (!customReason.trim() || customAmount === 0));
+    (selectedAdjustmentOptions.some((opt) => opt.requiresReason) && (!customReason.trim() || customAmount === 0));
   const disableEditSave = !editingParticipant ||
-    (editAdjustmentOption?.requiresReason && (!editCustomReason.trim() || editCustomAmount === 0));
+    (editAdjustmentOptions.some((opt) => opt.requiresReason) && (!editCustomReason.trim() || editCustomAmount === 0));
 
   const participantEditor = editingParticipant ? (
     <div className="editor-modal-backdrop" onClick={() => setEditingParticipant(null)}>
@@ -1413,18 +1599,24 @@ export default function HomePage() {
         onChange={(e) => setEditAdminNotes(e.target.value)}
         placeholder="例: A-07"
       />
-      <label className="label" htmlFor="edit-adjustment">金額変更</label>
-      <select
-        id="edit-adjustment"
-        className="select"
-        value={editAdjustmentKey}
-        onChange={(e) => setEditAdjustmentKey(e.target.value)}
-      >
-        {adjustmentOptions().map((opt) => (
-          <option key={opt.key} value={opt.key}>{opt.label}</option>
-        ))}
+      <label className="label" htmlFor="edit-venue-fee">枠</label>
+      <select id="edit-venue-fee" className="select" value={editVenueFeeName} onChange={(e) => setEditVenueFeeName(e.target.value)}>
+        {venueFeeOptions.map((name) => <option key={`edit-venue-${name}`} value={name}>{name}</option>)}
       </select>
-      {editAdjustmentOption?.requiresReason && (
+      <label className="label">金額変更（複数選択可）</label>
+      <div className="stack">
+        {adjustmentOptions().map((opt) => (
+          <label key={`edit-adjustment-${opt.key}`} className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <input
+              type="checkbox"
+              checked={editAdjustmentKeys.includes(opt.key)}
+              onChange={() => toggleAdjustment(opt.key, setEditAdjustmentKeys)}
+            />
+            {opt.label}
+          </label>
+        ))}
+      </div>
+      {editAdjustmentOptions.some((opt) => opt.requiresReason) && (
         <div className="stack">
           <input
             className="input"
@@ -1597,20 +1789,6 @@ export default function HomePage() {
               <div className="muted">受付用スキャン</div>
             </div>
             {isMobileViewport && <div className="muted">スマホ表示のため簡易UIを自動適用しています。</div>}
-            <label className="label" htmlFor="kiosk-tournament-select" style={{ marginTop: 8 }}>対象大会</label>
-            <select
-              id="kiosk-tournament-select"
-              className="select"
-              value={tournamentId}
-              onChange={(e) => handleTournamentSelect(e.target.value)}
-            >
-              <option value="">大会を選択</option>
-              {managedTournaments.map((tournament) => (
-                <option key={tournament.id} value={tournament.id}>
-                  {describeTournament(tournament)}
-                </option>
-              ))}
-            </select>
             <div ref={scannerContainerRef} style={{ borderRadius: 12, overflow: "hidden" }} />
             {!hasOperatorAccess && <div className="toast">チェックイン処理にはログインが必要です。</div>}
             <div className="divider" />
@@ -1663,19 +1841,21 @@ export default function HomePage() {
                   <label htmlFor="student" className="muted">学割を適用</label>
                 </div>
 
-                <label className="label" htmlFor="adjustment">枠・金額変更</label>
-                <select
-                  id="adjustment"
-                  className="select"
-                  value={selectedAdjustment}
-                  onChange={(e) => setSelectedAdjustment(e.target.value)}
-                >
+                <label className="label">枠・金額変更（複数選択可）</label>
+                <div className="stack">
                   {adjustmentOptions().map((opt) => (
-                    <option key={opt.key} value={opt.key}>{opt.label}</option>
+                    <label key={`adjustment-${opt.key}`} className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedAdjustments.includes(opt.key)}
+                        onChange={() => toggleAdjustment(opt.key, setSelectedAdjustments)}
+                      />
+                      {opt.label}
+                    </label>
                   ))}
-                </select>
+                </div>
 
-                {adjustmentOption.requiresReason && (
+                {selectedAdjustmentOptions.some((opt) => opt.requiresReason) && (
                   <div className="stack">
                     <label className="label" htmlFor="custom-reason">理由</label>
                     <input
@@ -1714,6 +1894,49 @@ export default function HomePage() {
             ) : (
               <div className="muted">QRを読み取ると参加者情報が表示されます</div>
             )}
+          </details>
+          <details className="card" open>
+            <summary className="section-title" style={{ cursor: "pointer" }}>QRなし追加エントリー</summary>
+            <div className="stack">
+              <input className="input" value={manualEntryName} onChange={(e) => setManualEntryName(e.target.value)} placeholder="参加者名" />
+              <select className="select" value={manualEntryVenueFee} onChange={(e) => setManualEntryVenueFee(e.target.value)}>
+                <option value="">枠を選択</option>
+                {venueFeeOptions.map((name) => <option key={`manual-venue-${name}`} value={name}>{name}</option>)}
+              </select>
+              <select className="select" value={manualEntryFeeType} onChange={(e) => setManualEntryFeeType(e.target.value as typeof manualEntryFeeType)}>
+                <option value="general">一般料金 ({pricingConfig.generalFee}円)</option>
+                <option value="bring">持参料金 ({pricingConfig.bringConsoleFee}円)</option>
+                <option value="student">学割固定 ({pricingConfig.studentFixedFee}円)</option>
+                <option value="free">支払いなし (0円)</option>
+                <option value="custom">任意金額</option>
+              </select>
+              {manualEntryFeeType === "custom" && (
+                <input className="input" type="number" value={manualEntryCustomFee} onChange={(e) => setManualEntryCustomFee(Number(e.target.value))} placeholder="基本料金" />
+              )}
+              <label className="label">追加調整（複数選択可）</label>
+              <div className="stack">
+                {adjustmentOptions().map((opt) => (
+                  <label key={`manual-adjustment-${opt.key}`} className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <input
+                      type="checkbox"
+                      checked={manualSelectedAdjustments.includes(opt.key)}
+                      onChange={() => toggleAdjustment(opt.key, setManualSelectedAdjustments)}
+                    />
+                    {opt.label}
+                  </label>
+                ))}
+              </div>
+              {manualAdjustmentOptions.some((opt) => opt.requiresReason) && (
+                <>
+                  <input className="input" value={manualCustomReason} onChange={(e) => setManualCustomReason(e.target.value)} placeholder="変更理由" />
+                  <input className="input" type="number" value={manualCustomAmount} onChange={(e) => setManualCustomAmount(Number(e.target.value))} placeholder="増減金額" />
+                </>
+              )}
+              <button className="button" type="button" onClick={handleManualEntryCheckIn} disabled={isManualEntrySubmitting}>
+                {isManualEntrySubmitting ? "登録中..." : "チェックイン確定"}
+              </button>
+              {manualEntryMessage && <div className="toast">{manualEntryMessage}</div>}
+            </div>
           </details>
         </div>
       )}
@@ -2027,6 +2250,31 @@ export default function HomePage() {
             <>
           <details className="stack" style={{ marginBottom: 12 }} open>
             <summary className="section-title" style={{ marginBottom: 0, cursor: "pointer" }}>対戦台の一括割り当て</summary>
+            <div className="stack" style={{ marginBottom: 8 }}>
+              <label className="label">枠の種類を追加</label>
+              <div className="flex" style={{ gap: 8 }}>
+                <input
+                  className="input"
+                  value={newVenueFeeName}
+                  onChange={(e) => setNewVenueFeeName(e.target.value)}
+                  placeholder="例: 見学枠 / 追加エントリー"
+                  disabled={!authSession.authenticated}
+                />
+                <button
+                  className="button secondary"
+                  type="button"
+                  disabled={!authSession.authenticated}
+                  onClick={() => {
+                    const next = newVenueFeeName.trim();
+                    if (!next) return;
+                    setVenueFeeCatalog((prev) => Array.from(new Set([...prev, next])).sort((a, b) => a.localeCompare(b, "ja")));
+                    setNewVenueFeeName("");
+                  }}
+                >
+                  枠を追加
+                </button>
+              </div>
+            </div>
             <div className="muted">
               枠（Venue Fee Name）を選んで、フォーマットで台番号を自動生成して割り当てます。例: <code>{"{Alphabet:A:D}-{Int:1:4}"}</code> / 総人数は <code>{"{Count}"}</code> で参照できます。
             </div>

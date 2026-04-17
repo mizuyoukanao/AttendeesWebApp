@@ -21,6 +21,10 @@ type StreamParticipant = {
   seatLabel?: string;
 };
 
+type StreamPatchChange =
+  | { type: "upsert"; participant: StreamParticipant }
+  | { type: "remove"; participantId: string };
+
 function serializeSse(event: string, payload: unknown) {
   return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
 }
@@ -62,7 +66,8 @@ export async function GET(
   let unsubscribe: (() => void) | null = null;
   let pollingTimer: NodeJS.Timeout | null = null;
   let heartbeatTimer: NodeJS.Timeout | null = null;
-  let lastSerialized = "";
+  const lastKnownParticipants = new Map<string, string>();
+  let firstListenerSnapshot = true;
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -71,13 +76,47 @@ export async function GET(
         controller.enqueue(encoder.encode(serializeSse(event, payload)));
       };
 
-      const sendSnapshot = async (event: "snapshot" | "update") => {
+      const sendPatch = (changes: StreamPatchChange[]) => {
+        if (!changes.length) return;
+        send("patch", { changes });
+      };
+
+      const sendSnapshot = async () => {
         const snap = await query.get();
         const participants = snap.docs.map((doc) => normalizeParticipant(doc.id, doc.data()));
-        const serialized = JSON.stringify(participants);
-        if (event === "update" && serialized === lastSerialized) return;
-        lastSerialized = serialized;
-        send(event, { participants });
+        lastKnownParticipants.clear();
+        participants.forEach((participant) => {
+          lastKnownParticipants.set(participant.participantId, JSON.stringify(participant));
+        });
+        send("snapshot", { participants });
+      };
+
+      const fetchAndSendDiffPatch = async () => {
+        const snap = await query.get();
+        const nextParticipants = snap.docs.map((doc) => normalizeParticipant(doc.id, doc.data()));
+        const nextMap = new Map<string, string>();
+        const changes: StreamPatchChange[] = [];
+
+        for (const participant of nextParticipants) {
+          const serialized = JSON.stringify(participant);
+          nextMap.set(participant.participantId, serialized);
+          if (lastKnownParticipants.get(participant.participantId) !== serialized) {
+            changes.push({ type: "upsert", participant });
+          }
+        }
+
+        for (const participantId of Array.from(lastKnownParticipants.keys())) {
+          if (!nextMap.has(participantId)) {
+            changes.push({ type: "remove", participantId });
+          }
+        }
+
+        lastKnownParticipants.clear();
+        for (const [participantId, serialized] of Array.from(nextMap.entries())) {
+          lastKnownParticipants.set(participantId, serialized);
+        }
+
+        sendPatch(changes);
       };
 
       const closeAll = () => {
@@ -99,23 +138,49 @@ export async function GET(
         send("heartbeat", { ts: Date.now() });
       }, 20_000);
 
-      sendSnapshot("snapshot").catch((error) => {
+      sendSnapshot().catch((error) => {
         send("error", { message: error?.message || "snapshot failed" });
       });
 
       try {
         unsubscribe = query.onSnapshot(
           (snap) => {
-            const participants = snap.docs.map((doc) => normalizeParticipant(doc.id, doc.data()));
-            const serialized = JSON.stringify(participants);
-            if (serialized === lastSerialized) return;
-            lastSerialized = serialized;
-            send("update", { participants });
+            if (pollingTimer) {
+              clearInterval(pollingTimer);
+              pollingTimer = null;
+            }
+            if (firstListenerSnapshot) {
+              firstListenerSnapshot = false;
+              return;
+            }
+
+            const changes: StreamPatchChange[] = [];
+            for (const docChange of snap.docChanges()) {
+              const participantId = docChange.doc.id;
+
+              if (docChange.type === "removed") {
+                if (lastKnownParticipants.has(participantId)) {
+                  lastKnownParticipants.delete(participantId);
+                  changes.push({ type: "remove", participantId });
+                }
+                continue;
+              }
+
+              const participant = normalizeParticipant(participantId, docChange.doc.data());
+              const serialized = JSON.stringify(participant);
+              if (lastKnownParticipants.get(participantId) === serialized) {
+                continue;
+              }
+              lastKnownParticipants.set(participantId, serialized);
+              changes.push({ type: "upsert", participant });
+            }
+
+            sendPatch(changes);
           },
           async () => {
             if (pollingTimer) return;
             pollingTimer = setInterval(() => {
-              sendSnapshot("update").catch(() => {
+              fetchAndSendDiffPatch().catch(() => {
                 // noop
               });
             }, 1500);
@@ -123,7 +188,7 @@ export async function GET(
         );
       } catch {
         pollingTimer = setInterval(() => {
-          sendSnapshot("update").catch(() => {
+          fetchAndSendDiffPatch().catch(() => {
             // noop
           });
         }, 1500);

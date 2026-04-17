@@ -55,6 +55,11 @@ function normalizeSeatAssignmentConfig(input: any): SeatAssignmentConfig {
   };
 }
 
+function normalizeVenueFeeCatalog(input: any): string[] {
+  if (!Array.isArray(input)) return [];
+  return Array.from(new Set(input.map((v: any) => String(v || "").trim()).filter(Boolean)));
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
@@ -76,7 +81,12 @@ export async function GET(
       ? normalizeSeatAssignmentConfig(data.seatAssignmentConfig)
       : defaultSeatAssignmentConfig;
 
-    return NextResponse.json({ seatAssignmentConfig, source: data?.seatAssignmentConfig ? "firestore" : "default" });
+    const venueFeeCatalog = normalizeVenueFeeCatalog(data?.venueFeeCatalog);
+    return NextResponse.json({
+      seatAssignmentConfig,
+      venueFeeCatalog,
+      source: data?.seatAssignmentConfig ? "firestore" : "default",
+    });
   } catch (error: any) {
     return NextResponse.json({ error: error?.message ?? "seatAssignmentConfig取得エラー" }, { status: 500 });
   }
@@ -95,6 +105,7 @@ export async function POST(
   }
 
   const seatAssignmentConfig = normalizeSeatAssignmentConfig(body.seatAssignmentConfig ?? body);
+  const venueFeeCatalog = normalizeVenueFeeCatalog(body.venueFeeCatalog);
 
   try {
     const firestore = ensureFirestore();
@@ -103,6 +114,7 @@ export async function POST(
     await docRef.set(
       {
         seatAssignmentConfig,
+        venueFeeCatalog,
         updatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true },
