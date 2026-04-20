@@ -122,12 +122,19 @@ function getVenueFeeDisplay(participant: Participant): string {
   return getParticipantVenueFees(participant).join(" / ");
 }
 
-function getParticipantStatusColor(participant: Participant): "red" | "orange" | "green" {
+function getParticipantStatusColor(participant: Participant): "red" | "green" {
   if (!participant.checkedIn) return "red";
-  const totalOwed = Number(participant.payment?.totalOwed ?? 0);
-  const totalPaid = Number(participant.payment?.totalPaid ?? 0);
-  if (totalPaid < totalOwed) return "orange";
   return "green";
+}
+
+function parseBringSeatLabel(value: string): { primary: string; secondary: number } | null {
+  const trimmed = value.trim();
+  const match = trimmed.match(/^([A-Za-z]+|\d+)-(\d+)$/);
+  if (!match) return null;
+  return {
+    primary: match[1].toUpperCase(),
+    secondary: Number(match[2]),
+  };
 }
 
 type ParticipantPatchChange =
@@ -428,6 +435,7 @@ export default function HomePage() {
   const [newFeeProfileLabel, setNewFeeProfileLabel] = useState("");
   const [newFeeProfileVenueFee, setNewFeeProfileVenueFee] = useState("");
   const [newFeeProfileAmount, setNewFeeProfileAmount] = useState(0);
+  const [bringManagerSortMode, setBringManagerSortMode] = useState<"seatFormat" | "nameAsc" | "nameDesc">("seatFormat");
   const scannerContainerRef = useRef<HTMLDivElement>(null);
   const lostFoundScannerContainerRef = useRef<HTMLDivElement>(null);
   const participantsRef = useRef<Participant[]>(initialParticipants);
@@ -1727,8 +1735,28 @@ export default function HomePage() {
   const bringManagerParticipants = useMemo(
     () => participants
       .filter((p) => String(p.seatLabel || p.adminNotes || "").trim())
-      .sort((a, b) => String(a.seatLabel || a.adminNotes || "").localeCompare(String(b.seatLabel || b.adminNotes || ""), "ja")),
-    [participants],
+      .sort((a, b) => {
+        if (bringManagerSortMode === "nameAsc") {
+          return getDisplayName(a).localeCompare(getDisplayName(b), "ja");
+        }
+        if (bringManagerSortMode === "nameDesc") {
+          return getDisplayName(b).localeCompare(getDisplayName(a), "ja");
+        }
+        const seatA = String(a.seatLabel || a.adminNotes || "").trim();
+        const seatB = String(b.seatLabel || b.adminNotes || "").trim();
+        const parsedA = parseBringSeatLabel(seatA);
+        const parsedB = parseBringSeatLabel(seatB);
+        if (parsedA && parsedB) {
+          const primary = parsedA.primary.localeCompare(parsedB.primary, "en", { numeric: true });
+          if (primary !== 0) return primary;
+          if (parsedA.secondary !== parsedB.secondary) return parsedA.secondary - parsedB.secondary;
+          return getDisplayName(a).localeCompare(getDisplayName(b), "ja");
+        }
+        if (parsedA && !parsedB) return -1;
+        if (!parsedA && parsedB) return 1;
+        return seatA.localeCompare(seatB, "ja", { numeric: true });
+      }),
+    [bringManagerSortMode, participants],
   );
 
   const paymentStatus = scanResult
@@ -2159,45 +2187,46 @@ export default function HomePage() {
         <details className="card" open>
           <summary className="section-title" style={{ cursor: "pointer" }}>持参管理（台番号一覧 / スワップ）</summary>
           <div className="muted" style={{ marginBottom: 8 }}>
-            台番号が割り当て済みの参加者を一覧表示します。行をドラッグ＆ドロップすると確認後に台番号をスワップします。
+            台番号が割り当て済みの参加者をセル表示します。セルをドラッグ＆ドロップすると確認後に台番号をスワップします。
+          </div>
+          <div className="flex" style={{ marginBottom: 12, flexWrap: "wrap" }}>
+            <label className="label" htmlFor="bring-manager-sort" style={{ marginBottom: 0 }}>並び順</label>
+            <select
+              id="bring-manager-sort"
+              className="select"
+              style={{ maxWidth: 320 }}
+              value={bringManagerSortMode}
+              onChange={(e) => setBringManagerSortMode(e.target.value as typeof bringManagerSortMode)}
+            >
+              <option value="seatFormat">台番号フォーマット順（未一致は下側）</option>
+              <option value="nameAsc">名前昇順</option>
+              <option value="nameDesc">名前降順</option>
+            </select>
           </div>
           {seatSwapMessage && <div className="toast">{seatSwapMessage}</div>}
-          <div className="table-container">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>台番号</th>
-                  <th>プレイヤー名</th>
-                  <th>枠</th>
-                  <th>チェックイン</th>
-                </tr>
-              </thead>
-              <tbody>
-                {bringManagerParticipants.map((p) => (
-                  <tr
-                    key={`bring-${p.participantId}`}
-                    draggable
-                    onDragStart={() => setDraggingParticipantId(p.participantId)}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={async () => {
-                      if (!draggingParticipantId || draggingParticipantId === p.participantId) return;
-                      await swapAssignedSeats(draggingParticipantId, p.participantId);
-                      setDraggingParticipantId("");
-                    }}
-                  >
-                    <td>{p.seatLabel || p.adminNotes || "-"}</td>
-                    <td>{getDisplayName(p)}</td>
-                    <td>{getVenueFeeDisplay(p) || "-"}</td>
-                    <td>{p.checkedIn ? "済" : "未"}</td>
-                  </tr>
-                ))}
-                {bringManagerParticipants.length === 0 && (
-                  <tr>
-                    <td colSpan={4} className="muted">台番号割り当て済みの参加者はいません</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+          <div className="bring-grid">
+            {bringManagerParticipants.map((p) => (
+              <button
+                key={`bring-${p.participantId}`}
+                type="button"
+                className="bring-cell"
+                draggable
+                onDragStart={() => setDraggingParticipantId(p.participantId)}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={async () => {
+                  if (!draggingParticipantId || draggingParticipantId === p.participantId) return;
+                  await swapAssignedSeats(draggingParticipantId, p.participantId);
+                  setDraggingParticipantId("");
+                }}
+              >
+                <span className="bring-led" style={{ background: getParticipantStatusColor(p) }} />
+                <span className="bring-name">{getDisplayName(p)}</span>
+                <span className="bring-seat">{p.seatLabel || p.adminNotes || "-"}</span>
+              </button>
+            ))}
+            {bringManagerParticipants.length === 0 && (
+              <div className="muted">台番号割り当て済みの参加者はいません</div>
+            )}
           </div>
         </details>
       )}
