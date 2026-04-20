@@ -5,6 +5,15 @@ import { getActorFromSession, requireTournamentAccess } from "@/lib/authz";
 
 const GRAPHQL_URL = "https://api.start.gg/gql/alpha";
 
+function normalizeVenueFeeNames(input: any): string[] {
+  if (Array.isArray(input)) {
+    return Array.from(new Set(input.map((v: any) => String(v || "").trim()).filter(Boolean)));
+  }
+  const raw = String(input || "").trim();
+  if (!raw) return [];
+  return Array.from(new Set(raw.split(/[,\n/／]+/).map((v) => v.trim()).filter(Boolean)));
+}
+
 async function resolveOperatorUserId(accessToken: string, fallback: string) {
   try {
     const response = await fetch(GRAPHQL_URL, {
@@ -79,6 +88,7 @@ function buildSeatLabels(pattern: string, totalCount: number): string[] {
 }
 
 function toParticipantState(data: any) {
+  const venueFeeNames = normalizeVenueFeeNames(data?.venueFeeNames ?? data?.venueFeeName);
   return {
     participantId: String(data?.participantId || ""),
     playerName: String(data?.playerName || ""),
@@ -87,7 +97,8 @@ function toParticipantState(data: any) {
     checkedIn: Boolean(data?.checkedIn),
     checkedInAt: data?.checkedInAt || null,
     checkedInBy: data?.checkedInBy || null,
-    venueFeeName: String(data?.venueFeeName || ""),
+    venueFeeName: venueFeeNames.join(" / "),
+    venueFeeNames,
     payment: {
       totalTransaction: Number(data?.payment?.totalTransaction ?? 0),
       totalOwed: Number(data?.payment?.totalOwed ?? 0),
@@ -203,11 +214,11 @@ export async function POST(
       const tournamentSnap = await tx.get(tournamentRef);
       const config = tournamentSnap.data()?.seatAssignmentConfig?.autoOnCheckin;
       const autoEnabled = Boolean(config?.enabled);
-      const participantVenueFeeName = String(existing.venueFeeName || "").trim();
+      const participantVenueFeeNames = normalizeVenueFeeNames(existing.venueFeeNames ?? existing.venueFeeName);
       const targetVenueFees: string[] = Array.isArray(config?.venueFeeNames)
         ? config.venueFeeNames.map((v: any) => String(v || "").trim()).filter(Boolean)
         : [];
-      const shouldAssignSeat = autoEnabled && targetVenueFees.includes(participantVenueFeeName);
+      const shouldAssignSeat = autoEnabled && participantVenueFeeNames.some((name) => targetVenueFees.includes(name));
 
       const payload: Record<string, unknown> = {
         checkedIn: true,
@@ -251,6 +262,12 @@ export async function POST(
         payload.seatLabel = assignedSeat;
         payload.adminNotes = assignedSeat;
       }
+
+      const stamp = new Date().toISOString();
+      const logParts = [`チェックイン (${reasonLabel})`];
+      if (deltaAmount !== 0) logParts.push(`金額調整: ${deltaAmount > 0 ? "+" : ""}${deltaAmount}`);
+      if (assignedSeat) logParts.push(`台割当: ${assignedSeat}`);
+      payload.adminLogEntries = FieldValue.arrayUnion(`[${stamp}] ${actorDisplayName}: ${logParts.join(" / ")}`);
 
       tx.set(participantRef, payload, { merge: true });
 

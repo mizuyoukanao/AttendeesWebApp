@@ -5,6 +5,15 @@ import { getActorFromSession, requireTournamentAccess } from "@/lib/authz";
 
 const GRAPHQL_URL = "https://api.start.gg/gql/alpha";
 
+function normalizeVenueFeeNames(input: any): string[] {
+  if (Array.isArray(input)) {
+    return Array.from(new Set(input.map((v: any) => String(v || "").trim()).filter(Boolean)));
+  }
+  const raw = String(input || "").trim();
+  if (!raw) return [];
+  return Array.from(new Set(raw.split(/[,\n/／]+/).map((v) => v.trim()).filter(Boolean)));
+}
+
 function expandAlphabetRange(start: string, end: string): string[] {
   if (!start || !end) return [];
   const startCode = start.toUpperCase().charCodeAt(0);
@@ -128,6 +137,7 @@ async function resolveOperatorUserId(accessToken: string, fallback: string) {
 }
 
 function toParticipantState(data: any) {
+  const venueFeeNames = normalizeVenueFeeNames(data?.venueFeeNames ?? data?.venueFeeName);
   return {
     participantId: String(data?.participantId || ""),
     playerName: String(data?.playerName || ""),
@@ -135,7 +145,8 @@ function toParticipantState(data: any) {
     checkedIn: Boolean(data?.checkedIn),
     checkedInAt: data?.checkedInAt || null,
     checkedInBy: data?.checkedInBy || null,
-    venueFeeName: String(data?.venueFeeName || ""),
+    venueFeeName: venueFeeNames.join(" / "),
+    venueFeeNames,
     payment: {
       totalTransaction: Number(data?.payment?.totalTransaction ?? 0),
       totalOwed: Number(data?.payment?.totalOwed ?? 0),
@@ -160,7 +171,9 @@ export async function PATCH(
   const resetCheckIn = Boolean(body.resetCheckIn);
   const checkedIn = typeof body.checkedIn === "boolean" ? body.checkedIn : undefined;
   const adminNotes = typeof body.adminNotes === "string" ? body.adminNotes.trim() : undefined;
-  const venueFeeName = typeof body.venueFeeName === "string" ? body.venueFeeName.trim() : undefined;
+  const venueFeeNames = body.venueFeeNames !== undefined || body.venueFeeName !== undefined
+    ? normalizeVenueFeeNames(body.venueFeeNames ?? body.venueFeeName)
+    : undefined;
   const reasonLabel = String(body.reasonLabel || "編集").trim();
   const deltaAmount = Number(body.deltaAmount ?? 0);
   const requestId = typeof body.requestId === "string" ? body.requestId.trim().slice(0, 128) : "";
@@ -212,8 +225,9 @@ export async function PATCH(
       if (adminNotes !== undefined) {
         payload.adminNotes = adminNotes;
       }
-      if (venueFeeName !== undefined) {
-        payload.venueFeeName = venueFeeName;
+      if (venueFeeNames !== undefined) {
+        payload.venueFeeNames = venueFeeNames;
+        payload.venueFeeName = venueFeeNames.join(" / ");
       }
       if (resetCheckIn) {
         payload.checkedIn = false;
@@ -229,12 +243,14 @@ export async function PATCH(
       const effectiveCheckedIn = resetCheckIn ? false : (checkedIn ?? Boolean(existing.checkedIn));
       const currentSeat = String(existing.seatLabel || "").trim();
       const nextAdminNotes = adminNotes !== undefined ? adminNotes : String(existing.adminNotes || "");
-      const effectiveVenueFeeName = venueFeeName !== undefined ? venueFeeName : String(existing.venueFeeName || "");
+      const effectiveVenueFeeNames = venueFeeNames !== undefined
+        ? venueFeeNames
+        : normalizeVenueFeeNames(existing.venueFeeNames ?? existing.venueFeeName);
       const targetVenueFees: string[] = Array.isArray(config?.venueFeeNames)
         ? config.venueFeeNames.map((v: any) => String(v || "").trim()).filter(Boolean)
         : [];
       const shouldAssignSeat = autoEnabled && effectiveCheckedIn && !currentSeat && !nextAdminNotes.trim()
-        && targetVenueFees.includes(effectiveVenueFeeName.trim());
+        && effectiveVenueFeeNames.some((name) => targetVenueFees.includes(name));
 
       if (shouldAssignSeat) {
         const reservePrefix = String(config?.reserveLabelPrefix || "予備台").trim() || "予備台";
@@ -269,6 +285,16 @@ export async function PATCH(
         }
         payload.seatLabel = assignedSeat;
         payload.adminNotes = assignedSeat;
+      }
+
+      const changeNotes: string[] = [];
+      if (venueFeeNames !== undefined) changeNotes.push(`枠変更: ${venueFeeNames.join(" / ") || "-"}`);
+      if (adminNotes !== undefined) changeNotes.push(`台番号メモ: ${adminNotes || "-"}`);
+      if (deltaAmount !== 0) changeNotes.push(`金額調整: ${deltaAmount > 0 ? "+" : ""}${deltaAmount} (${reasonLabel})`);
+      if (checkedIn !== undefined || resetCheckIn) changeNotes.push(`チェックイン状態更新`);
+      if (changeNotes.length) {
+        const stamp = new Date().toISOString();
+        payload.adminLogEntries = FieldValue.arrayUnion(`[${stamp}] ${actorDisplayName}: ${changeNotes.join(" / ")}`);
       }
 
       tx.set(participantRef, payload, { merge: true });

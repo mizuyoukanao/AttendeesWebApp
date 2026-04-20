@@ -15,6 +15,12 @@ type PricingConfig = {
   bringConsoleFee: number;
   studentFixedFee: number;
   adjustmentOptions: AdjustmentOption[];
+  feeProfiles?: Array<{
+    key: string;
+    label: string;
+    venueFeeName: string;
+    amount: number;
+  }>;
 };
 
 const defaultPricingConfig: PricingConfig = {
@@ -28,6 +34,11 @@ const defaultPricingConfig: PricingConfig = {
     { key: "student_general", label: "学割（一般）(-3000円)", deltaAmount: -3000, requiresReason: false },
     { key: "student_bring", label: "学割（持参）(-2000円)", deltaAmount: -2000, requiresReason: false },
     { key: "other", label: "その他（理由と金額を入力）", deltaAmount: 0, requiresReason: true },
+  ],
+  feeProfiles: [
+    { key: "general", label: "一般", venueFeeName: "一般枠", amount: 4000 },
+    { key: "bring", label: "持参", venueFeeName: "持参枠", amount: 3000 },
+    { key: "student", label: "学割", venueFeeName: "学割枠", amount: 1000 },
   ],
 };
 
@@ -50,6 +61,14 @@ function normalizePricingConfig(input: any): PricingConfig {
     bringConsoleFee: Number(input?.bringConsoleFee ?? defaultPricingConfig.bringConsoleFee),
     studentFixedFee: Number(input?.studentFixedFee ?? defaultPricingConfig.studentFixedFee),
     adjustmentOptions,
+    feeProfiles: Array.isArray(input?.feeProfiles)
+      ? input.feeProfiles.map((item: any, idx: number) => ({
+        key: String(item?.key || `profile_${idx + 1}`).trim() || `profile_${idx + 1}`,
+        label: String(item?.label || "").trim() || `料金${idx + 1}`,
+        venueFeeName: String(item?.venueFeeName || "").trim() || "一般枠",
+        amount: Number(item?.amount ?? 0),
+      }))
+      : defaultPricingConfig.feeProfiles,
   };
 }
 

@@ -10,6 +10,15 @@ type SeatPatternConfig = {
   reserveLabelPrefix: string;
 };
 
+function normalizeVenueFeeNames(input: any): string[] {
+  if (Array.isArray(input)) {
+    return Array.from(new Set(input.map((v: any) => String(v || "").trim()).filter(Boolean)));
+  }
+  const raw = String(input || "").trim();
+  if (!raw) return [];
+  return Array.from(new Set(raw.split(/[,\n/／]+/).map((v) => v.trim()).filter(Boolean)));
+}
+
 function expandAlphabetRange(start: string, end: string): string[] {
   if (!start || !end) return [];
   const startCode = start.toUpperCase().charCodeAt(0);
@@ -137,7 +146,7 @@ export async function POST(
     const seatMap = new Map(seatsSnap.docs.map((doc) => [doc.id, doc.data()]));
 
     const targets = allParticipants
-      .filter((p) => config.venueFeeNames.includes(String(p.data.venueFeeName || "").trim()));
+      .filter((p) => normalizeVenueFeeNames(p.data.venueFeeNames ?? p.data.venueFeeName).some((name) => config.venueFeeNames.includes(name)));
 
     const normalLabels = buildSeatLabels(config.pattern, Math.max(targets.length, 1));
     if (!normalLabels.length) {
