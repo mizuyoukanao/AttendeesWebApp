@@ -10,6 +10,7 @@ type StreamParticipant = {
   playerName: string;
   adminNotes?: string;
   venueFeeName?: string;
+  venueFeeNames?: string[];
   payment: {
     totalTransaction: number;
     totalOwed: number;
@@ -19,22 +20,39 @@ type StreamParticipant = {
   checkedInAt?: string;
   checkedInBy?: string;
   seatLabel?: string;
+  adminLogEntries?: string[];
 };
 
 type StreamPatchChange =
   | { type: "upsert"; participant: StreamParticipant }
   | { type: "remove"; participantId: string };
 
+function normalizeParticipantVenueFees(input: any): string[] {
+  if (Array.isArray(input)) {
+    return Array.from(new Set(input.map((v: any) => String(v || "").trim()).filter(Boolean)));
+  }
+  const raw = String(input || "").trim();
+  if (!raw) return [];
+  return Array.from(new Set(raw.split(/[,\n/／]+/).map((v) => v.trim()).filter(Boolean)));
+}
+
+function normalizeVenueFeeCatalog(input: any): string[] {
+  if (!Array.isArray(input)) return [];
+  return Array.from(new Set(input.map((v: any) => String(v || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, "ja"));
+}
+
 function serializeSse(event: string, payload: unknown) {
   return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
 }
 
 function normalizeParticipant(id: string, raw: any): StreamParticipant {
+  const venueFeeNames = normalizeParticipantVenueFees(raw?.venueFeeNames ?? raw?.venueFeeName);
   return {
     participantId: id,
     playerName: String(raw?.playerName || id),
     adminNotes: String(raw?.adminNotes || "") || "",
-    venueFeeName: String(raw?.venueFeeName || "") || "",
+    venueFeeName: venueFeeNames.join(" / "),
+    venueFeeNames,
     payment: {
       totalTransaction: Number(raw?.payment?.totalTransaction ?? 0),
       totalOwed: Number(raw?.payment?.totalOwed ?? 0),
@@ -44,6 +62,9 @@ function normalizeParticipant(id: string, raw: any): StreamParticipant {
     checkedInAt: raw?.checkedInAt?.toDate ? raw.checkedInAt.toDate().toISOString() : raw?.checkedInAt || undefined,
     checkedInBy: raw?.checkedInBy || undefined,
     seatLabel: String(raw?.seatLabel || ""),
+    adminLogEntries: Array.isArray(raw?.adminLogEntries)
+      ? raw.adminLogEntries.map((v: any) => String(v || "").trim()).filter(Boolean)
+      : [],
   };
 }
 
@@ -60,10 +81,12 @@ export async function GET(
     .doc(params.tournamentId)
     .collection("participants")
     .orderBy("participantId");
+  const tournamentRef = firestore.collection("tournaments").doc(params.tournamentId);
 
   const encoder = new TextEncoder();
   let closed = false;
   let unsubscribe: (() => void) | null = null;
+  let unsubscribeTournament: (() => void) | null = null;
   let pollingTimer: NodeJS.Timeout | null = null;
   let heartbeatTimer: NodeJS.Timeout | null = null;
   const lastKnownParticipants = new Map<string, string>();
@@ -123,6 +146,7 @@ export async function GET(
         if (closed) return;
         closed = true;
         if (unsubscribe) unsubscribe();
+        if (unsubscribeTournament) unsubscribeTournament();
         if (pollingTimer) clearInterval(pollingTimer);
         if (heartbeatTimer) clearInterval(heartbeatTimer);
         try {
@@ -141,6 +165,15 @@ export async function GET(
       sendSnapshot().catch((error) => {
         send("error", { message: error?.message || "snapshot failed" });
       });
+
+      try {
+        unsubscribeTournament = tournamentRef.onSnapshot((doc) => {
+          const venueFeeCatalog = normalizeVenueFeeCatalog(doc.data()?.venueFeeCatalog);
+          send("catalog", { venueFeeCatalog });
+        });
+      } catch {
+        // noop
+      }
 
       try {
         unsubscribe = query.onSnapshot(
@@ -197,6 +230,7 @@ export async function GET(
     cancel() {
       closed = true;
       if (unsubscribe) unsubscribe();
+      if (unsubscribeTournament) unsubscribeTournament();
       if (pollingTimer) clearInterval(pollingTimer);
       if (heartbeatTimer) clearInterval(heartbeatTimer);
     },

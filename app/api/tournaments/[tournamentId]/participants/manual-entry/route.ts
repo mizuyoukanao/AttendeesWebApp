@@ -9,6 +9,15 @@ function normalizeAmount(value: unknown) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function normalizeVenueFeeNames(input: any): string[] {
+  if (Array.isArray(input)) {
+    return Array.from(new Set(input.map((v: any) => String(v || "").trim()).filter(Boolean)));
+  }
+  const raw = String(input || "").trim();
+  if (!raw) return [];
+  return Array.from(new Set(raw.split(/[,\n/／]+/).map((v) => v.trim()).filter(Boolean)));
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
@@ -22,7 +31,8 @@ export async function POST(
   }
 
   const playerName = String(body.playerName || "").trim();
-  const venueFeeName = String(body.venueFeeName || "").trim();
+  const venueFeeNames = normalizeVenueFeeNames(body.venueFeeNames ?? body.venueFeeName);
+  const venueFeeName = venueFeeNames.join(" / ");
   const baseAmount = normalizeAmount(body.baseAmount);
 
   if (!playerName) {
@@ -45,6 +55,7 @@ export async function POST(
         participantId,
         playerName,
         venueFeeName,
+        venueFeeNames,
         payment: {
           totalTransaction: 0,
           totalOwed: baseAmount,
@@ -59,12 +70,13 @@ export async function POST(
         createdBy: actor.actorDisplayName,
         createdAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
+        adminLogEntries: [`[${new Date().toISOString()}] ${actor.actorDisplayName}: 手動追加エントリー (${venueFeeName})`],
       },
       { merge: false },
     );
 
     await tournamentRef.set({
-      venueFeeCatalog: FieldValue.arrayUnion(venueFeeName),
+      venueFeeCatalog: FieldValue.arrayUnion(...venueFeeNames),
       updatedAt: FieldValue.serverTimestamp(),
     }, { merge: true });
 
@@ -74,6 +86,7 @@ export async function POST(
         participantId,
         playerName,
         venueFeeName,
+        venueFeeNames,
         checkedIn: false,
         payment: {
           totalTransaction: 0,

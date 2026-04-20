@@ -9,20 +9,33 @@ type ParticipantPayload = {
   playerName?: string;
   adminNotes?: string;
   venueFeeName?: string;
+  venueFeeNames?: string[];
   checkedIn?: boolean;
   payment?: {
     totalTransaction?: number;
     totalOwed?: number;
     totalPaid?: number;
   };
+  adminLogEntries?: string[];
 };
 
+function normalizeVenueFeeNames(input: any): string[] {
+  if (Array.isArray(input)) {
+    return Array.from(new Set(input.map((v: any) => String(v || "").trim()).filter(Boolean)));
+  }
+  const raw = String(input || "").trim();
+  if (!raw) return [];
+  return Array.from(new Set(raw.split(/[,\n/／]+/).map((v) => v.trim()).filter(Boolean)));
+}
+
 function toParticipantResponse(id: string, raw: any) {
+  const venueFeeNames = normalizeVenueFeeNames(raw?.venueFeeNames ?? raw?.venueFeeName);
   return {
     participantId: id,
     playerName: String(raw?.playerName || id),
     adminNotes: String(raw?.adminNotes || ""),
-    venueFeeName: String(raw?.venueFeeName || ""),
+    venueFeeName: venueFeeNames.join(" / "),
+    venueFeeNames,
     payment: {
       totalTransaction: Number(raw?.payment?.totalTransaction ?? 0),
       totalOwed: Number(raw?.payment?.totalOwed ?? 0),
@@ -32,6 +45,9 @@ function toParticipantResponse(id: string, raw: any) {
     checkedInAt: raw?.checkedInAt?.toDate ? raw.checkedInAt.toDate().toISOString() : raw?.checkedInAt || undefined,
     checkedInBy: raw?.checkedInBy || undefined,
     seatLabel: String(raw?.seatLabel || ""),
+    adminLogEntries: Array.isArray(raw?.adminLogEntries)
+      ? raw.adminLogEntries.map((v: any) => String(v || "").trim()).filter(Boolean)
+      : [],
   };
 }
 
@@ -45,6 +61,7 @@ function normalizeParticipant(input: any): ParticipantPayload | null {
     participantId,
     playerName: String(input?.playerName || input?.GamerTag || input?.["GamerTag"] || input?.["Short GamerTag"] || "").trim() || participantId,
     adminNotes: String(input?.adminNotes || input?.["Admin Notes"] || "").trim() || undefined,
+    venueFeeNames: normalizeVenueFeeNames(input?.venueFeeNames ?? input?.venueFeeName ?? input?.["Venue Fee Name"]),
     venueFeeName: String(input?.venueFeeName || input?.["Venue Fee Name"] || "").trim() || undefined,
     checkedIn: Boolean(input?.checkedIn ?? input?.["Checked In"] ?? false),
     payment: {
@@ -131,7 +148,8 @@ export async function POST(
           adminNotes: preserveSeatLabel
             ? (existing as any)?.adminNotes ?? preserveSeatLabel
             : (participant.adminNotes ?? (existing as any)?.adminNotes ?? null),
-          venueFeeName: participant.venueFeeName ?? (existing as any)?.venueFeeName ?? null,
+          venueFeeNames: normalizeVenueFeeNames(participant.venueFeeNames ?? (existing as any)?.venueFeeNames ?? participant.venueFeeName ?? (existing as any)?.venueFeeName),
+          venueFeeName: normalizeVenueFeeNames(participant.venueFeeNames ?? (existing as any)?.venueFeeNames ?? participant.venueFeeName ?? (existing as any)?.venueFeeName).join(" / ") || null,
           payment: {
             totalTransaction: participant.payment?.totalTransaction ?? 0,
             totalOwed: participant.payment?.totalOwed ?? 0,

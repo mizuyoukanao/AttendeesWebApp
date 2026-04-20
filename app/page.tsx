@@ -17,6 +17,14 @@ type PricingConfig = {
   bringConsoleFee: number;
   studentFixedFee: number;
   adjustmentOptions: AdjustmentOption[];
+  feeProfiles: FeeProfile[];
+};
+
+type FeeProfile = {
+  key: string;
+  label: string;
+  venueFeeName: string;
+  amount: number;
 };
 
 const defaultPricingConfig: PricingConfig = {
@@ -30,6 +38,11 @@ const defaultPricingConfig: PricingConfig = {
     { key: "student_general", label: "学割（一般）(-3000円)", deltaAmount: -3000, requiresReason: false },
     { key: "student_bring", label: "学割（持参）(-2000円)", deltaAmount: -2000, requiresReason: false },
     { key: "other", label: "その他（理由と金額を入力）", deltaAmount: 0, requiresReason: true },
+  ],
+  feeProfiles: [
+    { key: "general", label: "一般", venueFeeName: "一般枠", amount: 4000 },
+    { key: "bring", label: "持参", venueFeeName: "持参枠", amount: 3000 },
+    { key: "student", label: "学割", venueFeeName: "学割枠", amount: 1000 },
   ],
 };
 
@@ -75,12 +88,47 @@ type Participant = {
   playerName: string;
   adminNotes?: string;
   venueFeeName?: string;
+  venueFeeNames?: string[];
   payment: Payment;
   checkedIn: boolean;
   checkedInAt?: string;
   checkedInBy?: string;
   seatLabel?: string;
+  adminLogEntries?: string[];
 };
+
+function normalizeVenueFeeNames(input: unknown): string[] {
+  if (Array.isArray(input)) {
+    return Array.from(new Set(input.map((name) => String(name || "").trim()).filter(Boolean)));
+  }
+  if (typeof input === "string") {
+    return Array.from(new Set(
+      input
+        .split(/[,\n/／]+/)
+        .map((name) => name.trim())
+        .filter(Boolean),
+    ));
+  }
+  return [];
+}
+
+function getParticipantVenueFees(participant: Participant): string[] {
+  const normalized = normalizeVenueFeeNames(participant.venueFeeNames);
+  if (normalized.length) return normalized;
+  return normalizeVenueFeeNames(participant.venueFeeName);
+}
+
+function getVenueFeeDisplay(participant: Participant): string {
+  return getParticipantVenueFees(participant).join(" / ");
+}
+
+function getParticipantStatusColor(participant: Participant): "red" | "orange" | "green" {
+  if (!participant.checkedIn) return "red";
+  const totalOwed = Number(participant.payment?.totalOwed ?? 0);
+  const totalPaid = Number(participant.payment?.totalPaid ?? 0);
+  if (totalPaid < totalOwed) return "orange";
+  return "green";
+}
 
 type ParticipantPatchChange =
   | { type: "upsert"; participant: Participant }
@@ -324,7 +372,7 @@ function buildSeatLabels(pattern: string, totalCount: number): string[] {
 }
 
 export default function HomePage() {
-  const [activeTab, setActiveTab] = useState<"kiosk" | "operator" | "dashboard" | "lostFound">("kiosk");
+  const [activeTab, setActiveTab] = useState<"kiosk" | "operator" | "dashboard" | "lostFound" | "bringManager">("kiosk");
   const [tournamentId, setTournamentId] = useState("demo-tournament");
   const [pricingConfig, setPricingConfig] = useState<PricingConfig>(defaultPricingConfig);
   const [pricingMessage, setPricingMessage] = useState("");
@@ -358,7 +406,7 @@ export default function HomePage() {
   const [overwriteSeatAssignment, setOverwriteSeatAssignment] = useState(false);
   const [editingParticipant, setEditingParticipant] = useState<Participant | null>(null);
   const [editAdminNotes, setEditAdminNotes] = useState("");
-  const [editVenueFeeName, setEditVenueFeeName] = useState("");
+  const [editVenueFeeNames, setEditVenueFeeNames] = useState<string[]>([]);
   const [editAdjustmentKeys, setEditAdjustmentKeys] = useState<string[]>([defaultPricingConfig.adjustmentOptions[0].key]);
   const [editCustomReason, setEditCustomReason] = useState("");
   const [editCustomAmount, setEditCustomAmount] = useState(0);
@@ -366,6 +414,7 @@ export default function HomePage() {
   const [manualEntryName, setManualEntryName] = useState("");
   const [manualEntryVenueFee, setManualEntryVenueFee] = useState("");
   const [manualEntryFeeType, setManualEntryFeeType] = useState<"general" | "bring" | "student" | "free" | "custom">("general");
+  const [manualFeeProfileKey, setManualFeeProfileKey] = useState("");
   const [manualEntryCustomFee, setManualEntryCustomFee] = useState(0);
   const [manualSelectedAdjustments, setManualSelectedAdjustments] = useState<string[]>([defaultPricingConfig.adjustmentOptions[0].key]);
   const [manualCustomReason, setManualCustomReason] = useState("");
@@ -374,6 +423,11 @@ export default function HomePage() {
   const [isManualEntrySubmitting, setIsManualEntrySubmitting] = useState(false);
   const [venueFeeCatalog, setVenueFeeCatalog] = useState<string[]>([]);
   const [newVenueFeeName, setNewVenueFeeName] = useState("");
+  const [draggingParticipantId, setDraggingParticipantId] = useState("");
+  const [seatSwapMessage, setSeatSwapMessage] = useState("");
+  const [newFeeProfileLabel, setNewFeeProfileLabel] = useState("");
+  const [newFeeProfileVenueFee, setNewFeeProfileVenueFee] = useState("");
+  const [newFeeProfileAmount, setNewFeeProfileAmount] = useState(0);
   const scannerContainerRef = useRef<HTMLDivElement>(null);
   const lostFoundScannerContainerRef = useRef<HTMLDivElement>(null);
   const participantsRef = useRef<Participant[]>(initialParticipants);
@@ -522,9 +576,13 @@ export default function HomePage() {
   }, [hasOperatorAccess]);
 
   useEffect(() => {
-    if (authSession.authenticated) {
+    if (authSession.authenticated && authSession.session?.mode === "startgg") {
       fetchManagedTournaments();
       loadAccessCodeHistory();
+    } else if (authSession.authenticated && authSession.session?.mode === "operator_code") {
+      setTournamentMessage("大会固有コード認証でログイン中です");
+      setTournamentError("");
+      setAccessCodeHistory([]);
     } else {
       setTournamentMessage("");
       setTournamentError("");
@@ -532,6 +590,24 @@ export default function HomePage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authSession.authenticated]);
+
+  useEffect(() => {
+    if (!authSession.authenticated || authSession.session?.mode !== "operator_code") return;
+
+    const allowed = Array.isArray(authSession.session?.allowedTournamentIds)
+      ? authSession.session.allowedTournamentIds.map((id) => String(id || "").trim()).filter(Boolean)
+      : [];
+    if (!allowed.length) return;
+
+    setManagedTournaments((prev) => {
+      const byId = new Map(prev.map((item) => [item.id, item]));
+      return allowed.map((id) => byId.get(id) || ({ id, name: id } as ManagedTournament));
+    });
+
+    if (!allowed.includes(tournamentId)) {
+      setTournamentId(allowed[0]);
+    }
+  }, [authSession, tournamentId]);
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 768px), (pointer: coarse)");
@@ -553,6 +629,12 @@ export default function HomePage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tournamentId, authSession.authenticated, hasOperatorAccess]);
+
+  useEffect(() => {
+    setIssuedAccessCode("");
+    setAccessCodeHistory([]);
+    setAccessCodeAdminMessage("");
+  }, [tournamentId]);
 
   async function fetchParticipantsSnapshot(targetTournamentId: string) {
     const res = await fetch(`/api/tournaments/${encodeURIComponent(targetTournamentId)}/participants`, {
@@ -604,8 +686,19 @@ export default function HomePage() {
       }
     };
 
+    const onCatalogEvent = (event: MessageEvent) => {
+      try {
+        const payload = JSON.parse(event.data);
+        const nextCatalog = Array.isArray(payload?.venueFeeCatalog) ? payload.venueFeeCatalog : [];
+        setVenueFeeCatalog(nextCatalog);
+      } catch {
+        // noop
+      }
+    };
+
     source.addEventListener("snapshot", snapshotEventHandler);
     source.addEventListener("patch", onPatchEvent);
+    source.addEventListener("catalog", onCatalogEvent);
 
     source.onerror = async () => {
       if (closed) return;
@@ -628,6 +721,7 @@ export default function HomePage() {
       closed = true;
       source.removeEventListener("snapshot", snapshotEventHandler);
       source.removeEventListener("patch", onPatchEvent);
+      source.removeEventListener("catalog", onCatalogEvent);
       source.close();
     };
   }, [tournamentId, hasOperatorAccess]);
@@ -674,7 +768,12 @@ export default function HomePage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || res.statusText);
       const config = (data.pricingConfig as PricingConfig) || defaultPricingConfig;
-      setPricingConfig(config);
+      setPricingConfig({
+        ...defaultPricingConfig,
+        ...config,
+        adjustmentOptions: Array.isArray(config.adjustmentOptions) ? config.adjustmentOptions : defaultPricingConfig.adjustmentOptions,
+        feeProfiles: Array.isArray(config.feeProfiles) && config.feeProfiles.length ? config.feeProfiles : defaultPricingConfig.feeProfiles,
+      });
       setPricingSource(data.source || "firestore");
       setPricingName(data.name || "");
       setSelectedAdjustments([(config.adjustmentOptions[0]?.key) || "none"]);
@@ -737,6 +836,23 @@ export default function HomePage() {
     }
   }
 
+  async function persistVenueFeeCatalog(nextCatalog: string[]) {
+    if (!authSession.authenticated || !tournamentId) return;
+    const normalized = Array.from(new Set(nextCatalog.map((name) => name.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, "ja"));
+    try {
+      const res = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/seat-assignment`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seatAssignmentConfig, venueFeeCatalog: normalized }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || res.statusText);
+      setAssignmentMessage("枠の種類を保存しました");
+    } catch (error: any) {
+      setAssignmentMessage(`枠の種類の保存に失敗しました: ${error?.message || "unknown"}`);
+    }
+  }
+
   async function savePricingConfig() {
     setPricingSaving(true);
     setPricingMessage("料金設定を保存しています...");
@@ -793,6 +909,28 @@ export default function HomePage() {
       const next = prev.adjustmentOptions.filter((_, i) => i !== index);
       return { ...prev, adjustmentOptions: next };
     });
+  }
+
+  function addFeeProfile() {
+    const label = newFeeProfileLabel.trim();
+    const venueFeeName = newFeeProfileVenueFee.trim();
+    if (!label || !venueFeeName) return;
+    const key = `profile_${Date.now()}`;
+    setPricingConfig((prev) => ({
+      ...prev,
+      feeProfiles: [...prev.feeProfiles, { key, label, venueFeeName, amount: Number(newFeeProfileAmount || 0) }],
+    }));
+    setNewFeeProfileLabel("");
+    setNewFeeProfileVenueFee("");
+    setNewFeeProfileAmount(0);
+  }
+
+  function removeFeeProfile(key: string) {
+    setPricingConfig((prev) => ({
+      ...prev,
+      feeProfiles: prev.feeProfiles.filter((item) => item.key !== key),
+    }));
+    if (manualFeeProfileKey === key) setManualFeeProfileKey("");
   }
 
   async function refreshSession() {
@@ -922,6 +1060,24 @@ export default function HomePage() {
     }
   }
 
+  async function swapAssignedSeats(participantIdA: string, participantIdB: string) {
+    if (!tournamentId || !participantIdA || !participantIdB) return;
+    const ok = window.confirm("2人の台番号をスワップします。よろしいですか？");
+    if (!ok) return;
+    try {
+      const res = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/seat-assignment/swap`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ participantIdA, participantIdB }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || res.statusText);
+      setSeatSwapMessage("台番号をスワップしました");
+    } catch (error: any) {
+      setSeatSwapMessage(`台番号スワップに失敗しました: ${error?.message || "unknown"}`);
+    }
+  }
+
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     setAuthSession({ authenticated: false });
@@ -1039,7 +1195,7 @@ export default function HomePage() {
     setCustomAmount(0);
     setEditingParticipant(null);
     setEditAdminNotes("");
-    setEditVenueFeeName("");
+    setEditVenueFeeNames([]);
     setEditAdjustmentKeys([pricingConfig.adjustmentOptions[0]?.key || "none"]);
     setEditCustomReason("");
     setEditCustomAmount(0);
@@ -1049,7 +1205,7 @@ export default function HomePage() {
   function openParticipantEditor(target: Participant) {
     setEditingParticipant(target);
     setEditAdminNotes(target.adminNotes || "");
-    setEditVenueFeeName(target.venueFeeName || "");
+    setEditVenueFeeNames(getParticipantVenueFees(target));
     setEditAdjustmentKeys([pricingConfig.adjustmentOptions[0]?.key || "none"]);
     setEditCustomReason("");
     setEditCustomAmount(0);
@@ -1139,7 +1295,7 @@ export default function HomePage() {
           },
           body: JSON.stringify({
             adminNotes: editAdminNotes,
-            venueFeeName: editVenueFeeName,
+            venueFeeNames: editVenueFeeNames,
             deltaAmount: delta,
             reasonLabel,
             requestId: crypto.randomUUID(),
@@ -1184,6 +1340,12 @@ export default function HomePage() {
     }));
   }
 
+  function toggleEditVenueFee(name: string) {
+    setEditVenueFeeNames((prev) => prev.includes(name)
+      ? prev.filter((item) => item !== name)
+      : [...prev, name]);
+  }
+
   function parseCsvList(value: string) {
     return value
       .split(/[\n,]/)
@@ -1192,6 +1354,8 @@ export default function HomePage() {
   }
 
   function getManualBaseAmount() {
+    const selectedProfile = pricingConfig.feeProfiles.find((profile) => profile.key === manualFeeProfileKey);
+    if (selectedProfile) return Number(selectedProfile.amount ?? 0);
     if (manualEntryFeeType === "general") return pricingConfig.generalFee;
     if (manualEntryFeeType === "bring") return pricingConfig.bringConsoleFee;
     if (manualEntryFeeType === "student") return pricingConfig.studentFixedFee;
@@ -1226,6 +1390,7 @@ export default function HomePage() {
         body: JSON.stringify({
           playerName: manualEntryName.trim(),
           venueFeeName: manualEntryVenueFee.trim(),
+          venueFeeNames: [manualEntryVenueFee.trim()],
           baseAmount: getManualBaseAmount(),
         }),
       });
@@ -1355,6 +1520,7 @@ export default function HomePage() {
           const gamerTag = indexMap["GamerTag"] >= 0 ? String(row[indexMap["GamerTag"]]).trim() : "";
           const shortTag = indexMap["Short GamerTag"] >= 0 ? String(row[indexMap["Short GamerTag"]]).trim() : "";
           const venueFeeName = indexMap["Venue Fee Name"] >= 0 ? String(row[indexMap["Venue Fee Name"]]).trim() : "";
+          const venueFeeNames = normalizeVenueFeeNames(venueFeeName);
           const adminNotes = indexMap["Admin Notes"] >= 0 ? String(row[indexMap["Admin Notes"]]).trim() : "";
           const totalOwed = Number(row[indexMap["Total Owed"]] || 0);
           const totalPaid = Number(row[indexMap["Total Paid"]] || 0);
@@ -1367,6 +1533,7 @@ export default function HomePage() {
             playerName: gamerTag || shortTag || id,
             adminNotes,
             venueFeeName,
+            venueFeeNames,
             payment: {
               totalTransaction,
               totalOwed,
@@ -1462,8 +1629,9 @@ export default function HomePage() {
     const rows = sorted.map((participant) => ({
       ID: participant.participantId,
       プレイヤー名: getDisplayName(participant),
-      枠: participant.venueFeeName || "",
+      枠: getVenueFeeDisplay(participant),
       台番号: participant.seatLabel || participant.adminNotes || "",
+      備考履歴: Array.isArray(participant.adminLogEntries) ? participant.adminLogEntries.join(" | ") : "",
       totalTransaction: participant.payment.totalTransaction ?? 0,
       totalOwed: participant.payment.totalOwed ?? 0,
       totalPaid: participant.payment.totalPaid ?? 0,
@@ -1488,7 +1656,7 @@ export default function HomePage() {
     () => Array.from(
       new Set([
         ...venueFeeCatalog,
-        ...participants.map((p) => (p.venueFeeName || "").trim()).filter(Boolean),
+        ...participants.flatMap((p) => getParticipantVenueFees(p)),
       ]),
     ).sort((a, b) => a.localeCompare(b, "ja")),
     [participants, venueFeeCatalog],
@@ -1519,10 +1687,10 @@ export default function HomePage() {
     if (!manualEntryVenueFee && venueFeeOptions[0]) {
       setManualEntryVenueFee(venueFeeOptions[0]);
     }
-    if (editingParticipant && !editVenueFeeName && editingParticipant.venueFeeName) {
-      setEditVenueFeeName(editingParticipant.venueFeeName);
+    if (editingParticipant && editVenueFeeNames.length === 0) {
+      setEditVenueFeeNames(getParticipantVenueFees(editingParticipant));
     }
-  }, [venueFeeOptions, manualEntryVenueFee, editVenueFeeName, editingParticipant]);
+  }, [venueFeeOptions, manualEntryVenueFee, editVenueFeeNames.length, editingParticipant]);
 
   const filteredParticipants = useMemo(() => {
     const filtered = participants.filter((p) => {
@@ -1532,7 +1700,7 @@ export default function HomePage() {
         filter === "all" ||
         (filter === "checkedIn" && p.checkedIn) ||
         (filter === "notCheckedIn" && !p.checkedIn);
-      const matchesVenueFee = venueFeeFilter === "all" || (p.venueFeeName || "") === venueFeeFilter;
+      const matchesVenueFee = venueFeeFilter === "all" || getParticipantVenueFees(p).includes(venueFeeFilter);
       return matchesSearch && matchesFilter && matchesVenueFee;
     });
     return filtered.sort((a, b) => {
@@ -1546,7 +1714,7 @@ export default function HomePage() {
   const assignmentTargets = useMemo(() => {
     if (!seatAssignmentConfig.bulk.venueFeeNames.length) return [];
     return participants
-      .filter((p) => seatAssignmentConfig.bulk.venueFeeNames.includes((p.venueFeeName || "").trim()))
+      .filter((p) => getParticipantVenueFees(p).some((fee) => seatAssignmentConfig.bulk.venueFeeNames.includes(fee)))
       .filter((p) => overwriteSeatAssignment || !(p.adminNotes || "").trim())
       .sort((a, b) => a.participantId.localeCompare(b.participantId, "en", { numeric: true }));
   }, [overwriteSeatAssignment, participants, seatAssignmentConfig.bulk.venueFeeNames]);
@@ -1554,6 +1722,13 @@ export default function HomePage() {
   const seatLabelPreview = useMemo(
     () => buildSeatLabels(seatAssignmentConfig.bulk.pattern, assignmentTargets.length).slice(0, 8),
     [seatAssignmentConfig.bulk.pattern, assignmentTargets.length],
+  );
+
+  const bringManagerParticipants = useMemo(
+    () => participants
+      .filter((p) => String(p.seatLabel || p.adminNotes || "").trim())
+      .sort((a, b) => String(a.seatLabel || a.adminNotes || "").localeCompare(String(b.seatLabel || b.adminNotes || ""), "ja")),
+    [participants],
   );
 
   const paymentStatus = scanResult
@@ -1572,6 +1747,7 @@ export default function HomePage() {
     !hasOperatorAccess ||
     (selectedAdjustmentOptions.some((opt) => opt.requiresReason) && (!customReason.trim() || customAmount === 0));
   const disableEditSave = !editingParticipant ||
+    editVenueFeeNames.length === 0 ||
     (editAdjustmentOptions.some((opt) => opt.requiresReason) && (!editCustomReason.trim() || editCustomAmount === 0));
 
   const participantEditor = editingParticipant ? (
@@ -1599,10 +1775,28 @@ export default function HomePage() {
         onChange={(e) => setEditAdminNotes(e.target.value)}
         placeholder="例: A-07"
       />
-      <label className="label" htmlFor="edit-venue-fee">枠</label>
-      <select id="edit-venue-fee" className="select" value={editVenueFeeName} onChange={(e) => setEditVenueFeeName(e.target.value)}>
-        {venueFeeOptions.map((name) => <option key={`edit-venue-${name}`} value={name}>{name}</option>)}
-      </select>
+      <label className="label">枠（複数選択可）</label>
+      <div className="stack">
+        {venueFeeOptions.map((name) => (
+          <label key={`edit-venue-${name}`} className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <input
+              type="checkbox"
+              checked={editVenueFeeNames.includes(name)}
+              onChange={() => toggleEditVenueFee(name)}
+            />
+            {name}
+          </label>
+        ))}
+      </div>
+      <label className="label">備考履歴（最新10件）</label>
+      <div className="stack" style={{ maxHeight: 160, overflow: "auto", border: "1px solid #2f3b52", borderRadius: 8, padding: 8 }}>
+        {(editingParticipant.adminLogEntries || []).slice(-10).reverse().map((entry, idx) => (
+          <div key={`admin-log-${idx}`} className="muted" style={{ fontSize: 12 }}>{entry}</div>
+        ))}
+        {(!editingParticipant.adminLogEntries || editingParticipant.adminLogEntries.length === 0) && (
+          <div className="muted" style={{ fontSize: 12 }}>履歴はありません</div>
+        )}
+      </div>
       <label className="label">金額変更（複数選択可）</label>
       <div className="stack">
         {adjustmentOptions().map((opt) => (
@@ -1734,6 +1928,7 @@ export default function HomePage() {
             { key: "kiosk", label: "受付・QRスキャン" },
             { key: "operator", label: "運営ログイン・CSVアップロード" },
             { key: "dashboard", label: "ダッシュボード" },
+            { key: "bringManager", label: "持参管理" },
             { key: "lostFound", label: "遺失物チェック" },
           ].map((tab) => (
             <button
@@ -1822,7 +2017,7 @@ export default function HomePage() {
                 </div>
                 <div className="tag-grid">
                   <span className="badge">ID: {scanResult.participantId}</span>
-                  <span className="badge">枠: {scanResult.venueFeeName || "-"}</span>
+                  <span className="badge">枠: {getVenueFeeDisplay(scanResult) || "-"}</span>
                   <span className="badge">対戦台: {scanResult.adminNotes || "未割当"}</span>
                   <span className="badge">Total Transaction: {scanResult.payment.totalTransaction}</span>
                   <span className="badge">Total Owed: {scanResult.payment.totalOwed}</span>
@@ -1899,6 +2094,25 @@ export default function HomePage() {
             <summary className="section-title" style={{ cursor: "pointer" }}>QRなし追加エントリー</summary>
             <div className="stack">
               <input className="input" value={manualEntryName} onChange={(e) => setManualEntryName(e.target.value)} placeholder="参加者名" />
+              <select
+                className="select"
+                value={manualFeeProfileKey}
+                onChange={(e) => {
+                  const key = e.target.value;
+                  setManualFeeProfileKey(key);
+                  const profile = pricingConfig.feeProfiles.find((item) => item.key === key);
+                  if (profile) {
+                    setManualEntryVenueFee(profile.venueFeeName);
+                    setManualEntryFeeType("custom");
+                    setManualEntryCustomFee(profile.amount);
+                  }
+                }}
+              >
+                <option value="">料金テンプレートを選択（任意）</option>
+                {pricingConfig.feeProfiles.map((profile) => (
+                  <option key={profile.key} value={profile.key}>{profile.label} / {profile.venueFeeName} / {profile.amount}円</option>
+                ))}
+              </select>
               <select className="select" value={manualEntryVenueFee} onChange={(e) => setManualEntryVenueFee(e.target.value)}>
                 <option value="">枠を選択</option>
                 {venueFeeOptions.map((name) => <option key={`manual-venue-${name}`} value={name}>{name}</option>)}
@@ -1941,6 +2155,53 @@ export default function HomePage() {
         </div>
       )}
 
+      {activeTab === "bringManager" && (
+        <details className="card" open>
+          <summary className="section-title" style={{ cursor: "pointer" }}>持参管理（台番号一覧 / スワップ）</summary>
+          <div className="muted" style={{ marginBottom: 8 }}>
+            台番号が割り当て済みの参加者を一覧表示します。行をドラッグ＆ドロップすると確認後に台番号をスワップします。
+          </div>
+          {seatSwapMessage && <div className="toast">{seatSwapMessage}</div>}
+          <div className="table-container">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>台番号</th>
+                  <th>プレイヤー名</th>
+                  <th>枠</th>
+                  <th>チェックイン</th>
+                </tr>
+              </thead>
+              <tbody>
+                {bringManagerParticipants.map((p) => (
+                  <tr
+                    key={`bring-${p.participantId}`}
+                    draggable
+                    onDragStart={() => setDraggingParticipantId(p.participantId)}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={async () => {
+                      if (!draggingParticipantId || draggingParticipantId === p.participantId) return;
+                      await swapAssignedSeats(draggingParticipantId, p.participantId);
+                      setDraggingParticipantId("");
+                    }}
+                  >
+                    <td>{p.seatLabel || p.adminNotes || "-"}</td>
+                    <td>{getDisplayName(p)}</td>
+                    <td>{getVenueFeeDisplay(p) || "-"}</td>
+                    <td>{p.checkedIn ? "済" : "未"}</td>
+                  </tr>
+                ))}
+                {bringManagerParticipants.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="muted">台番号割り当て済みの参加者はいません</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
+
       {activeTab === "lostFound" && (
         <div className="card-grid">
           <details className="card" open>
@@ -1976,7 +2237,7 @@ export default function HomePage() {
                 <div style={{ fontSize: 20, fontWeight: 800 }}>{getDisplayName(lostFoundResult)}</div>
                 <div className="tag-grid">
                   <span className="badge">ID: {lostFoundResult.participantId}</span>
-                  <span className="badge">枠: {lostFoundResult.venueFeeName || "未設定"}</span>
+                  <span className="badge">枠: {getVenueFeeDisplay(lostFoundResult) || "未設定"}</span>
                   <span className="badge">対戦台: {lostFoundResult.adminNotes || "未割当"}</span>
                 </div>
                 <div className="muted">
@@ -2064,6 +2325,23 @@ export default function HomePage() {
                   onChange={(e) => updatePricingField("studentFixedFee", Number(e.target.value))}
                   disabled={!authSession.authenticated}
                 />
+              </div>
+            </div>
+
+            <div className="divider" />
+            <div className="section-title">料金テンプレート（追加・削除可）</div>
+            <div className="stack" style={{ gap: 8 }}>
+              {pricingConfig.feeProfiles.map((profile) => (
+                <div key={profile.key} className="flex-between card" style={{ background: "#0d1117" }}>
+                  <div className="muted">{profile.label} / {profile.venueFeeName} / {profile.amount}円</div>
+                  <button className="button secondary" type="button" onClick={() => removeFeeProfile(profile.key)} disabled={!authSession.authenticated}>削除</button>
+                </div>
+              ))}
+              <div className="grid" style={{ gridTemplateColumns: "2fr 2fr 1fr auto", gap: 8 }}>
+                <input className="input" value={newFeeProfileLabel} onChange={(e) => setNewFeeProfileLabel(e.target.value)} placeholder="表示名（例: 一般）" />
+                <input className="input" value={newFeeProfileVenueFee} onChange={(e) => setNewFeeProfileVenueFee(e.target.value)} placeholder="紐付け枠（例: 一般枠）" />
+                <input className="input" type="number" value={newFeeProfileAmount} onChange={(e) => setNewFeeProfileAmount(Number(e.target.value))} placeholder="料金" />
+                <button className="button secondary" type="button" onClick={addFeeProfile} disabled={!authSession.authenticated}>追加</button>
               </div>
             </div>
 
@@ -2264,10 +2542,12 @@ export default function HomePage() {
                   className="button secondary"
                   type="button"
                   disabled={!authSession.authenticated}
-                  onClick={() => {
+                  onClick={async () => {
                     const next = newVenueFeeName.trim();
                     if (!next) return;
-                    setVenueFeeCatalog((prev) => Array.from(new Set([...prev, next])).sort((a, b) => a.localeCompare(b, "ja")));
+                    const normalizedCatalog = Array.from(new Set([...venueFeeCatalog, next])).sort((a, b) => a.localeCompare(b, "ja"));
+                    setVenueFeeCatalog(normalizedCatalog);
+                    await persistVenueFeeCatalog(normalizedCatalog);
                     setNewVenueFeeName("");
                   }}
                 >
@@ -2442,6 +2722,7 @@ export default function HomePage() {
               <option value="nameDesc">名前降順</option>
             </select>
             </div>
+            <div className="muted" style={{ marginBottom: 8 }}>表示件数: {filteredParticipants.length} / 全体: {participants.length}</div>
 
             {isMobileViewport ? (
               <div className="stack" style={{ gap: 10 }}>
@@ -2456,12 +2737,16 @@ export default function HomePage() {
                   return (
                     <div key={p.participantId} className="card" style={{ background: "#0d1117" }}>
                       <div className="flex-between">
-                        <strong>{getDisplayName(p)}</strong>
+                        <strong style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ width: 10, height: 10, borderRadius: "50%", background: getParticipantStatusColor(p) }} />
+                          {getDisplayName(p)}
+                        </strong>
                         <span className={clsx("status", status.status === "prepaid" ? "success" : "danger")}>{status.label}</span>
                       </div>
                       <div className="muted">ID: {p.participantId}</div>
-                      <div className="muted">枠: {p.venueFeeName || "-"}</div>
+                      <div className="muted">枠: {getVenueFeeDisplay(p) || "-"}</div>
                       <div className="muted">台番号: {p.adminNotes || "-"}</div>
+                      <div className="muted">備考: {p.adminLogEntries?.[p.adminLogEntries.length - 1] || "-"}</div>
                       <div className="muted">チェックイン: {p.checkedIn ? formatTimestampJst(new Date(p.checkedInAt || "")) : "未"}</div>
                       <button className="button secondary" type="button" onClick={() => openParticipantEditor(p)}>編集</button>
                     </div>
@@ -2480,6 +2765,7 @@ export default function HomePage() {
                       <th>台番号</th>
                       <th>支払い</th>
                       <th>チェックイン</th>
+                      <th>備考</th>
                       <th>操作</th>
                     </tr>
                   </thead>
@@ -2495,13 +2781,19 @@ export default function HomePage() {
                       return (
                         <tr key={p.participantId}>
                           <td>{p.participantId}</td>
-                          <td>{getDisplayName(p)}</td>
-                          <td>{p.venueFeeName || "-"}</td>
+                          <td>
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                              <span style={{ width: 10, height: 10, borderRadius: "50%", background: getParticipantStatusColor(p) }} />
+                              {getDisplayName(p)}
+                            </span>
+                          </td>
+                          <td>{getVenueFeeDisplay(p) || "-"}</td>
                           <td>{p.adminNotes || "-"}</td>
                           <td>
                             <span className={clsx("status", status.status === "prepaid" ? "success" : "danger")}>{status.label}</span>
                           </td>
                           <td>{p.checkedIn ? formatTimestampJst(new Date(p.checkedInAt || "")) : "未"}</td>
+                          <td>{p.adminLogEntries?.[p.adminLogEntries.length - 1] || "-"}</td>
                           <td>
                             <button
                               className="button secondary"
@@ -2518,7 +2810,7 @@ export default function HomePage() {
                     })}
                     {filteredParticipants.length === 0 && (
                       <tr>
-                        <td colSpan={8} className="muted">該当データがありません</td>
+                        <td colSpan={9} className="muted">該当データがありません</td>
                       </tr>
                     )}
                   </tbody>
