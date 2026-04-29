@@ -46,6 +46,20 @@ const defaultPricingConfig: PricingConfig = {
   ],
 };
 
+function syncLegacyFeeFields(
+  feeProfiles: FeeProfile[],
+  fallback: Pick<PricingConfig, "generalFee" | "bringConsoleFee" | "studentFixedFee">,
+) {
+  const general = feeProfiles.find((profile) => profile.key === "general");
+  const bring = feeProfiles.find((profile) => profile.key === "bring");
+  const student = feeProfiles.find((profile) => profile.key === "student");
+  return {
+    generalFee: general ? Number(general.amount ?? 0) : fallback.generalFee,
+    bringConsoleFee: bring ? Number(bring.amount ?? 0) : fallback.bringConsoleFee,
+    studentFixedFee: student ? Number(student.amount ?? 0) : fallback.studentFixedFee,
+  };
+}
+
 const initialParticipants: Participant[] = [
   {
     participantId: "101",
@@ -264,6 +278,15 @@ function getDisplayName(participant: Participant) {
   return participant.playerName || participant.participantId;
 }
 
+function getBringNameFontSize(name: string) {
+  const length = Array.from(String(name || "")).length;
+  if (length <= 10) return 30;
+  if (length <= 14) return 26;
+  if (length <= 18) return 22;
+  if (length <= 24) return 18;
+  return 14;
+}
+
 function formatTimestampJst(date: Date) {
   const offsetMs = 9 * 60 * 60 * 1000;
   const local = new Date(date.getTime() + offsetMs);
@@ -420,9 +443,7 @@ export default function HomePage() {
   const [editCheckedIn, setEditCheckedIn] = useState(false);
   const [manualEntryName, setManualEntryName] = useState("");
   const [manualEntryVenueFee, setManualEntryVenueFee] = useState("");
-  const [manualEntryFeeType, setManualEntryFeeType] = useState<"general" | "bring" | "student" | "free" | "custom">("general");
   const [manualFeeProfileKey, setManualFeeProfileKey] = useState("");
-  const [manualEntryCustomFee, setManualEntryCustomFee] = useState(0);
   const [manualSelectedAdjustments, setManualSelectedAdjustments] = useState<string[]>([defaultPricingConfig.adjustmentOptions[0].key]);
   const [manualCustomReason, setManualCustomReason] = useState("");
   const [manualCustomAmount, setManualCustomAmount] = useState(0);
@@ -882,10 +903,6 @@ export default function HomePage() {
     }
   }
 
-  function updatePricingField(key: keyof PricingConfig, value: number) {
-    setPricingConfig((prev) => ({ ...prev, [key]: value }));
-  }
-
   function updateAdjustment(index: number, key: keyof AdjustmentOption, value: string | number | boolean) {
     setPricingConfig((prev) => {
       const next = [...prev.adjustmentOptions];
@@ -893,6 +910,23 @@ export default function HomePage() {
       if (!target) return prev;
       next[index] = { ...target, [key]: value } as AdjustmentOption;
       return { ...prev, adjustmentOptions: next };
+    });
+  }
+
+  function updateFeeProfile(index: number, key: keyof FeeProfile, value: string | number) {
+    setPricingConfig((prev) => {
+      const next = [...prev.feeProfiles];
+      const target = next[index];
+      if (!target) return prev;
+      next[index] = {
+        ...target,
+        [key]: key === "amount" ? Number(value) : String(value),
+      } as FeeProfile;
+      return {
+        ...prev,
+        ...syncLegacyFeeFields(next, prev),
+        feeProfiles: next,
+      };
     });
   }
 
@@ -926,6 +960,10 @@ export default function HomePage() {
     const key = `profile_${Date.now()}`;
     setPricingConfig((prev) => ({
       ...prev,
+      ...syncLegacyFeeFields(
+        [...prev.feeProfiles, { key, label, venueFeeName, amount: Number(newFeeProfileAmount || 0) }],
+        prev,
+      ),
       feeProfiles: [...prev.feeProfiles, { key, label, venueFeeName, amount: Number(newFeeProfileAmount || 0) }],
     }));
     setNewFeeProfileLabel("");
@@ -936,6 +974,10 @@ export default function HomePage() {
   function removeFeeProfile(key: string) {
     setPricingConfig((prev) => ({
       ...prev,
+      ...syncLegacyFeeFields(
+        prev.feeProfiles.filter((item) => item.key !== key),
+        prev,
+      ),
       feeProfiles: prev.feeProfiles.filter((item) => item.key !== key),
     }));
     if (manualFeeProfileKey === key) setManualFeeProfileKey("");
@@ -1363,12 +1405,7 @@ export default function HomePage() {
 
   function getManualBaseAmount() {
     const selectedProfile = pricingConfig.feeProfiles.find((profile) => profile.key === manualFeeProfileKey);
-    if (selectedProfile) return Number(selectedProfile.amount ?? 0);
-    if (manualEntryFeeType === "general") return pricingConfig.generalFee;
-    if (manualEntryFeeType === "bring") return pricingConfig.bringConsoleFee;
-    if (manualEntryFeeType === "student") return pricingConfig.studentFixedFee;
-    if (manualEntryFeeType === "free") return 0;
-    return manualEntryCustomFee;
+    return Number(selectedProfile?.amount ?? 0);
   }
 
   async function handleManualEntryCheckIn() {
@@ -1378,6 +1415,11 @@ export default function HomePage() {
     }
     if (!tournamentId) {
       setManualEntryMessage("大会を選択してください");
+      return;
+    }
+    const selectedProfile = pricingConfig.feeProfiles.find((profile) => profile.key === manualFeeProfileKey);
+    if (!selectedProfile) {
+      setManualEntryMessage("料金テンプレートを選択してください");
       return;
     }
     if (!manualEntryName.trim() || !manualEntryVenueFee.trim()) {
@@ -1434,8 +1476,7 @@ export default function HomePage() {
       setManualEntryMessage(`${manualEntryName.trim()} を追加エントリーでチェックインしました${seatSuffix}`);
       setManualEntryName("");
       setManualEntryVenueFee("");
-      setManualEntryFeeType("general");
-      setManualEntryCustomFee(0);
+      setManualFeeProfileKey("");
       setManualSelectedAdjustments([pricingConfig.adjustmentOptions[0]?.key || "none"]);
       setManualCustomReason("");
       setManualCustomAmount(0);
@@ -1692,13 +1733,10 @@ export default function HomePage() {
   }, [venueFeeOptions, venueFeeFilter]);
 
   useEffect(() => {
-    if (!manualEntryVenueFee && venueFeeOptions[0]) {
-      setManualEntryVenueFee(venueFeeOptions[0]);
-    }
     if (editingParticipant && editVenueFeeNames.length === 0) {
       setEditVenueFeeNames(getParticipantVenueFees(editingParticipant));
     }
-  }, [venueFeeOptions, manualEntryVenueFee, editVenueFeeNames.length, editingParticipant]);
+  }, [editVenueFeeNames.length, editingParticipant]);
 
   const filteredParticipants = useMemo(() => {
     const filtered = participants.filter((p) => {
@@ -2131,29 +2169,18 @@ export default function HomePage() {
                   const profile = pricingConfig.feeProfiles.find((item) => item.key === key);
                   if (profile) {
                     setManualEntryVenueFee(profile.venueFeeName);
-                    setManualEntryFeeType("custom");
-                    setManualEntryCustomFee(profile.amount);
+                  } else {
+                    setManualEntryVenueFee("");
                   }
                 }}
               >
-                <option value="">料金テンプレートを選択（任意）</option>
+                <option value="">料金テンプレートを選択</option>
                 {pricingConfig.feeProfiles.map((profile) => (
                   <option key={profile.key} value={profile.key}>{profile.label} / {profile.venueFeeName} / {profile.amount}円</option>
                 ))}
               </select>
-              <select className="select" value={manualEntryVenueFee} onChange={(e) => setManualEntryVenueFee(e.target.value)}>
-                <option value="">枠を選択</option>
-                {venueFeeOptions.map((name) => <option key={`manual-venue-${name}`} value={name}>{name}</option>)}
-              </select>
-              <select className="select" value={manualEntryFeeType} onChange={(e) => setManualEntryFeeType(e.target.value as typeof manualEntryFeeType)}>
-                <option value="general">一般料金 ({pricingConfig.generalFee}円)</option>
-                <option value="bring">持参料金 ({pricingConfig.bringConsoleFee}円)</option>
-                <option value="student">学割固定 ({pricingConfig.studentFixedFee}円)</option>
-                <option value="free">支払いなし (0円)</option>
-                <option value="custom">任意金額</option>
-              </select>
-              {manualEntryFeeType === "custom" && (
-                <input className="input" type="number" value={manualEntryCustomFee} onChange={(e) => setManualEntryCustomFee(Number(e.target.value))} placeholder="基本料金" />
+              {manualEntryVenueFee && (
+                <div className="muted">適用枠: {manualEntryVenueFee}</div>
               )}
               <label className="label">追加調整（複数選択可）</label>
               <div className="stack">
@@ -2220,7 +2247,13 @@ export default function HomePage() {
                 }}
               >
                 <span className="bring-led" style={{ background: getParticipantStatusColor(p) }} />
-                <span className="bring-name">{getDisplayName(p)}</span>
+                <span
+                  className="bring-name"
+                  style={{ fontSize: `${getBringNameFontSize(getDisplayName(p))}px` }}
+                  title={getDisplayName(p)}
+                >
+                  {getDisplayName(p)}
+                </span>
                 <span className="bring-seat">{p.seatLabel || p.adminNotes || "-"}</span>
               </button>
             ))}
@@ -2321,49 +2354,35 @@ export default function HomePage() {
             </div>
 
             <div className="divider" />
-            <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-              <div className="stack">
-                <label className="label" htmlFor="general-fee">一般料金</label>
-                <input
-                  id="general-fee"
-                  className="input"
-                  type="number"
-                  value={pricingConfig.generalFee}
-                  onChange={(e) => updatePricingField("generalFee", Number(e.target.value))}
-                  disabled={!authSession.authenticated}
-                />
-              </div>
-              <div className="stack">
-                <label className="label" htmlFor="bring-fee">持参料金</label>
-                <input
-                  id="bring-fee"
-                  className="input"
-                  type="number"
-                  value={pricingConfig.bringConsoleFee}
-                  onChange={(e) => updatePricingField("bringConsoleFee", Number(e.target.value))}
-                  disabled={!authSession.authenticated}
-                />
-              </div>
-              <div className="stack">
-                <label className="label" htmlFor="student-fee">学割料金</label>
-                <input
-                  id="student-fee"
-                  className="input"
-                  type="number"
-                  value={pricingConfig.studentFixedFee}
-                  onChange={(e) => updatePricingField("studentFixedFee", Number(e.target.value))}
-                  disabled={!authSession.authenticated}
-                />
-              </div>
-            </div>
-
-            <div className="divider" />
             <div className="section-title">料金テンプレート（追加・削除可）</div>
             <div className="stack" style={{ gap: 8 }}>
-              {pricingConfig.feeProfiles.map((profile) => (
-                <div key={profile.key} className="flex-between card" style={{ background: "#0d1117" }}>
-                  <div className="muted">{profile.label} / {profile.venueFeeName} / {profile.amount}円</div>
-                  <button className="button secondary" type="button" onClick={() => removeFeeProfile(profile.key)} disabled={!authSession.authenticated}>削除</button>
+              {pricingConfig.feeProfiles.map((profile, index) => (
+                <div key={profile.key} className="card" style={{ background: "#0d1117" }}>
+                  <div className="grid" style={{ gridTemplateColumns: "1.3fr 1fr 1fr auto", gap: 8 }}>
+                    <input
+                      className="input"
+                      value={profile.label}
+                      onChange={(e) => updateFeeProfile(index, "label", e.target.value)}
+                      placeholder="表示名"
+                      disabled={!authSession.authenticated}
+                    />
+                    <input
+                      className="input"
+                      value={profile.venueFeeName}
+                      onChange={(e) => updateFeeProfile(index, "venueFeeName", e.target.value)}
+                      placeholder="紐付け枠"
+                      disabled={!authSession.authenticated}
+                    />
+                    <input
+                      className="input"
+                      type="number"
+                      value={profile.amount}
+                      onChange={(e) => updateFeeProfile(index, "amount", Number(e.target.value))}
+                      placeholder="料金"
+                      disabled={!authSession.authenticated}
+                    />
+                    <button className="button secondary" type="button" onClick={() => removeFeeProfile(profile.key)} disabled={!authSession.authenticated}>削除</button>
+                  </div>
                 </div>
               ))}
               <div className="grid" style={{ gridTemplateColumns: "2fr 2fr 1fr auto", gap: 8 }}>

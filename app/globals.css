@@ -272,8 +272,8 @@ header {
 
 .bring-name {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: visible;
+  text-overflow: clip;
   white-space: nowrap;
   font-size: 30px;
   line-height: 1.1;
