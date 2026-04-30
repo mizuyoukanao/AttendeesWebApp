@@ -2248,7 +2248,7 @@ export default function HomePage() {
               >
                 <span className="bring-led" style={{ background: getParticipantStatusColor(p) }} />
                 <span
-                  className={`bring-name ${getBringNameFontSize(getDisplayName(p)) === 14 ? "bring-name-truncated" : ""}`.trim()}
+                  className="bring-name"
                   style={{ fontSize: `${getBringNameFontSize(getDisplayName(p))}px` }}
                   title={getDisplayName(p)}
                 >

@@ -272,17 +272,11 @@ header {
 
 .bring-name {
   min-width: 0;
-  overflow: visible;
-  text-overflow: clip;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 30px;
   line-height: 1.1;
-}
-
-
-.bring-name-truncated {
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .bring-seat {
   font-size: 30px;
