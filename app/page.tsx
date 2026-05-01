@@ -261,7 +261,8 @@ function computePaymentStatus(
   customDelta: number,
   pricing: PricingConfig,
 ): PaymentStatus {
-  const baseDue = participant.payment.totalTransaction !== 0 ? 0 : participant.payment.totalOwed;
+  const hasPaymentRecord = participant.payment.totalTransaction !== 0 || participant.payment.totalPaid !== 0;
+  const baseDue = hasPaymentRecord ? 0 : participant.payment.totalOwed;
   const studentDue = studentDiscount ? pricing.studentFixedFee : baseDue;
   const delta = adjustment.key === "other" ? customDelta : adjustment.deltaAmount;
   const amount = studentDue + delta;
@@ -1799,7 +1800,8 @@ export default function HomePage() {
 
   const paymentStatus = scanResult
     ? (() => {
-      const baseDue = scanResult.payment.totalTransaction !== 0 ? 0 : scanResult.payment.totalOwed;
+      const hasPaymentRecord = scanResult.payment.totalTransaction !== 0 || scanResult.payment.totalPaid !== 0;
+      const baseDue = hasPaymentRecord ? 0 : scanResult.payment.totalOwed;
       const studentDue = studentDiscount ? pricingConfig.studentFixedFee : baseDue;
       const delta = selectedAdjustmentOptions.reduce((sum, opt) => sum + (opt.key === "other" ? customAmount : opt.deltaAmount), 0);
       const amount = studentDue + delta;
