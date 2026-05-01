@@ -403,6 +403,8 @@ function buildSeatLabels(pattern: string, totalCount: number): string[] {
 }
 
 export default function HomePage() {
+  const DASHBOARD_INITIAL_VISIBLE_COUNT = 500;
+  const DASHBOARD_VISIBLE_INCREMENT = 500;
   const [activeTab, setActiveTab] = useState<"kiosk" | "operator" | "dashboard" | "lostFound" | "bringManager">("kiosk");
   const [tournamentId, setTournamentId] = useState("demo-tournament");
   const [pricingConfig, setPricingConfig] = useState<PricingConfig>(defaultPricingConfig);
@@ -477,6 +479,8 @@ export default function HomePage() {
   const [tournamentMessage, setTournamentMessage] = useState("");
   const [tournamentError, setTournamentError] = useState("");
   const [isMobileViewport, setIsMobileViewport] = useState(false);
+  const [dashboardVisibleCount, setDashboardVisibleCount] = useState(DASHBOARD_INITIAL_VISIBLE_COUNT);
+  const dashboardLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const compactKiosk = isMobileViewport;
   const hasOperatorAccess = Boolean(authSession.authenticated);
   const isStartggAuthenticated = authSession.authenticated && authSession.session?.mode === "startgg";
@@ -1758,6 +1762,31 @@ export default function HomePage() {
     });
   }, [participants, searchTerm, filter, venueFeeFilter, sortOrder]);
 
+  useEffect(() => {
+    setDashboardVisibleCount(DASHBOARD_INITIAL_VISIBLE_COUNT);
+  }, [activeTab, searchTerm, filter, venueFeeFilter, sortOrder, tournamentId, participants.length]);
+
+  const visibleFilteredParticipants = useMemo(
+    () => filteredParticipants.slice(0, dashboardVisibleCount),
+    [filteredParticipants, dashboardVisibleCount],
+  );
+
+  useEffect(() => {
+    if (activeTab !== "dashboard") return undefined;
+    const sentinel = dashboardLoadMoreRef.current;
+    if (!sentinel) return undefined;
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      setDashboardVisibleCount((prev) => Math.min(prev + DASHBOARD_VISIBLE_INCREMENT, filteredParticipants.length));
+    }, {
+      root: null,
+      rootMargin: "300px 0px",
+      threshold: 0,
+    });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [activeTab, filteredParticipants.length]);
+
   const assignmentTargets = useMemo(() => {
     if (!seatAssignmentConfig.bulk.venueFeeNames.length) return [];
     return participants
@@ -2772,11 +2801,13 @@ export default function HomePage() {
               <option value="nameDesc">名前降順</option>
             </select>
             </div>
-            <div className="muted" style={{ marginBottom: 8 }}>表示件数: {filteredParticipants.length} / 全体: {participants.length}</div>
+            <div className="muted" style={{ marginBottom: 8 }}>
+              表示件数: {Math.min(visibleFilteredParticipants.length, filteredParticipants.length)} / 絞り込み結果: {filteredParticipants.length} / 全体: {participants.length}
+            </div>
 
             {isMobileViewport ? (
               <div className="stack" style={{ gap: 10 }}>
-                {filteredParticipants.map((p) => {
+                {visibleFilteredParticipants.map((p) => {
                   const status = computePaymentStatus(
                     p,
                     false,
@@ -2820,7 +2851,7 @@ export default function HomePage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredParticipants.map((p) => {
+                    {visibleFilteredParticipants.map((p) => {
                       const status = computePaymentStatus(
                         p,
                         false,
@@ -2865,6 +2896,11 @@ export default function HomePage() {
                     )}
                   </tbody>
                 </table>
+              </div>
+            )}
+            {filteredParticipants.length > visibleFilteredParticipants.length && (
+              <div ref={dashboardLoadMoreRef} className="muted" style={{ marginTop: 8 }}>
+                スクロールでさらに読み込み中…
               </div>
             )}
           </details>
