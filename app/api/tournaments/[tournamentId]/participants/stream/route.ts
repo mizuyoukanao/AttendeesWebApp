@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
 import { requireTournamentAccess } from "@/lib/authz";
+import { applySessionCookie } from "@/lib/session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -68,11 +69,18 @@ function normalizeParticipant(id: string, raw: any): StreamParticipant {
   };
 }
 
+function withRefreshedSessionCookie(response: NextResponse, authz: { refreshedSessionCookie?: { signedSession: string; maxAgeSeconds: number } }) {
+  if (authz.refreshedSessionCookie) {
+    applySessionCookie(response, authz.refreshedSessionCookie.signedSession, authz.refreshedSessionCookie.maxAgeSeconds);
+  }
+  return response;
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg", "operator_code"]);
+  const authz = await requireTournamentAccess(request, params.tournamentId, ["startgg", "operator_code"]);
   if (!authz.ok) return authz.response;
 
   const firestore = ensureFirestore();

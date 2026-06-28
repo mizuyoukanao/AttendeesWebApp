@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
 import { getActorFromSession, requireTournamentAccess } from "@/lib/authz";
+import { applySessionCookie } from "@/lib/session";
 
 function normalizeAmount(value: unknown) {
   const n = Number(value ?? 0);
@@ -18,11 +19,18 @@ function normalizeVenueFeeNames(input: any): string[] {
   return Array.from(new Set(raw.split(/[,\n/／]+/).map((v) => v.trim()).filter(Boolean)));
 }
 
+function withRefreshedSessionCookie(response: NextResponse, authz: { refreshedSessionCookie?: { signedSession: string; maxAgeSeconds: number } }) {
+  if (authz.refreshedSessionCookie) {
+    applySessionCookie(response, authz.refreshedSessionCookie.signedSession, authz.refreshedSessionCookie.maxAgeSeconds);
+  }
+  return response;
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg", "operator_code"]);
+  const authz = await requireTournamentAccess(request, params.tournamentId, ["startgg", "operator_code"]);
   if (!authz.ok) return authz.response;
 
   const body = await request.json().catch(() => null);
@@ -30,6 +38,7 @@ export async function POST(
     return NextResponse.json({ error: "リクエストボディが空です" }, { status: 400 });
   }
 
+  const requestedParticipantId = String(body.participantId || "").trim();
   const playerName = String(body.playerName || "").trim();
   const venueFeeNames = normalizeVenueFeeNames(body.venueFeeNames ?? body.venueFeeName);
   const venueFeeName = venueFeeNames.join(" / ");
@@ -47,7 +56,11 @@ export async function POST(
     const firestore = ensureFirestore();
     const tournamentRef = firestore.collection("tournaments").doc(params.tournamentId);
     const participantsCol = tournamentRef.collection("participants");
-    const participantId = `manual_${Date.now()}_${randomUUID().slice(0, 8)}`;
+    const participantId = requestedParticipantId || `manual_${Date.now()}_${randomUUID().slice(0, 8)}`;
+    const existingSnap = await participantsCol.doc(participantId).get();
+    if (existingSnap.exists) {
+      return NextResponse.json({ error: "参加者IDは既に登録されています" }, { status: 409 });
+    }
     const actor = getActorFromSession(authz.session);
 
     await participantsCol.doc(participantId).set(
@@ -66,11 +79,12 @@ export async function POST(
         checkedInBy: null,
         seatLabel: "",
         adminNotes: "",
-        createdFrom: "manual_entry",
+        createdFrom: requestedParticipantId ? "qr_missing_manual_checkin" : "manual_entry",
+        temporaryCheckin: Boolean(requestedParticipantId),
         createdBy: actor.actorDisplayName,
         createdAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
-        adminLogEntries: [`[${new Date().toISOString()}] ${actor.actorDisplayName}: 手動追加エントリー (${venueFeeName})`],
+        adminLogEntries: [`[${new Date().toISOString()}] ${actor.actorDisplayName}: ${requestedParticipantId ? "未登録QRから一時手動チェックイン作成" : "手動追加エントリー"} (${venueFeeName})`],
       },
       { merge: false },
     );
@@ -80,7 +94,7 @@ export async function POST(
       updatedAt: FieldValue.serverTimestamp(),
     }, { merge: true });
 
-    return NextResponse.json({
+    return withRefreshedSessionCookie(NextResponse.json({
       ok: true,
       participant: {
         participantId,
@@ -94,7 +108,7 @@ export async function POST(
           totalPaid: 0,
         },
       },
-    });
+    }), authz);
   } catch (error: any) {
     return NextResponse.json({ error: error?.message ?? "手動参加者登録エラー" }, { status: 500 });
   }

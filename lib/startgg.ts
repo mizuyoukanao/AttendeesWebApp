@@ -1,6 +1,8 @@
 const GRAPHQL_URL = "https://api.start.gg/gql/alpha";
 const PAGE_SIZE = 10;
 
+export const MAX_SESSION_TOURNAMENTS = 100;
+
 const VIEWER_QUERY = `query Viewer { currentUser { id slug name player { gamerTag } } }`;
 
 const MANAGED_TOURNAMENTS_QUERY = `
@@ -31,6 +33,60 @@ export type StartggViewer = {
   name?: string;
   player?: { gamerTag?: string | null };
 };
+
+export type ManagedTournament = {
+  id: string;
+  name?: string;
+  slug?: string;
+  startAt?: number | null;
+  city?: string | null;
+  addrState?: string | null;
+  countryCode?: string | null;
+};
+
+function toStartAtNumber(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+export function sortManagedTournamentsByRecency<T extends { id: string; startAt?: number | null }>(tournaments: T[]): T[] {
+  return [...tournaments].sort((a, b) => {
+    const byStartAt = toStartAtNumber(b.startAt) - toStartAtNumber(a.startAt);
+    if (byStartAt !== 0) return byStartAt;
+    return String(b.id).localeCompare(String(a.id));
+  });
+}
+
+export function buildRollingTournamentIds(managedTournaments: ManagedTournament[], limit = MAX_SESSION_TOURNAMENTS): string[] {
+  const unique = Array.from(new Map(managedTournaments.map((t) => [String(t.id), String(t.id)])).values());
+  return unique.slice(0, limit);
+}
+
+export function buildSessionTournamentIds(
+  managedTournaments: ManagedTournament[],
+  options?: { limit?: number; pinnedTournamentId?: string },
+): { allowedTournamentIds: string[]; pinnedTournamentId?: string } {
+  const limit = options?.limit ?? MAX_SESSION_TOURNAMENTS;
+  const pinnedTournamentId = options?.pinnedTournamentId ? String(options.pinnedTournamentId) : undefined;
+  const sorted = sortManagedTournamentsByRecency(managedTournaments);
+  const rolling = buildRollingTournamentIds(sorted, limit);
+
+  if (!pinnedTournamentId) {
+    return { allowedTournamentIds: rolling };
+  }
+
+  const exists = sorted.some((t) => String(t.id) === pinnedTournamentId);
+  if (!exists) {
+    return { allowedTournamentIds: rolling };
+  }
+
+  if (rolling.includes(pinnedTournamentId)) {
+    return { allowedTournamentIds: rolling, pinnedTournamentId };
+  }
+
+  const withoutPinned = rolling.filter((id) => id !== pinnedTournamentId).slice(0, Math.max(0, limit - 1));
+  return { allowedTournamentIds: [pinnedTournamentId, ...withoutPinned], pinnedTournamentId };
+}
 
 async function requestGraphql(accessToken: string, query: string, variables?: Record<string, unknown>) {
   const response = await fetch(GRAPHQL_URL, {
@@ -65,40 +121,11 @@ export async function fetchViewer(accessToken: string): Promise<StartggViewer | 
 }
 
 export async function fetchManagedTournamentIds(accessToken: string): Promise<string[]> {
-  let page = 1;
-  const allNodes: any[] = [];
-  let currentUserId = "";
-
-  while (true) {
-    const data = await requestGraphql(accessToken, MANAGED_TOURNAMENTS_QUERY, {
-      page,
-      perPage: PAGE_SIZE,
-      roles: ["admin", "manager", "bracketManager"],
-    });
-
-    const currentUser = data?.data?.currentUser;
-    const nodes = currentUser?.tournaments?.nodes ?? [];
-
-    if (!currentUserId) {
-      currentUserId = String(currentUser?.id || "");
-    }
-
-    allNodes.push(...nodes);
-    if (nodes.length < PAGE_SIZE) break;
-    page += 1;
-  }
-
-  return Array.from(new Set(
-    allNodes
-      .filter((tournament) => {
-        const admins = Array.isArray(tournament?.admins) ? tournament.admins : [];
-        return admins.some((admin: any) => String(admin?.id || "") === currentUserId);
-      })
-      .map((tournament) => String(tournament.id)),
-  ));
+  const tournaments = await fetchManagedTournaments(accessToken);
+  return tournaments.map((t) => String(t.id));
 }
 
-export async function fetchManagedTournaments(accessToken: string) {
+export async function fetchManagedTournaments(accessToken: string): Promise<ManagedTournament[]> {
   let page = 1;
   const allNodes: any[] = [];
   let currentUserId = "";
@@ -125,14 +152,15 @@ export async function fetchManagedTournaments(accessToken: string) {
       return admins.some((admin: any) => String(admin?.id || "") === currentUserId);
     })
     .map((tournament) => ({
-      id: tournament.id,
+      id: String(tournament.id),
       name: tournament.name,
       slug: tournament.slug,
-      startAt: tournament.startAt,
+      startAt: toStartAtNumber(tournament.startAt),
       city: tournament.city,
       addrState: tournament.addrState,
       countryCode: tournament.countryCode,
     }));
 
-  return Array.from(new Map(managerOnly.map((t) => [String(t.id), t])).values());
+  const deduped = Array.from(new Map(managerOnly.map((t) => [String(t.id), t])).values());
+  return sortManagedTournamentsByRecency(deduped);
 }

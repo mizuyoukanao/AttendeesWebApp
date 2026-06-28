@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
 import { getActorFromSession, requireTournamentAccess } from "@/lib/authz";
+import { applySessionCookie } from "@/lib/session";
 
 const GRAPHQL_URL = "https://api.start.gg/gql/alpha";
 
@@ -156,11 +157,18 @@ function toParticipantState(data: any) {
   };
 }
 
+function withRefreshedSessionCookie(response: NextResponse, authz: { refreshedSessionCookie?: { signedSession: string; maxAgeSeconds: number } }) {
+  if (authz.refreshedSessionCookie) {
+    applySessionCookie(response, authz.refreshedSessionCookie.signedSession, authz.refreshedSessionCookie.maxAgeSeconds);
+  }
+  return response;
+}
+
 export async function PATCH(
   request: NextRequest,
   { params }: { params: { tournamentId: string; participantId: string } },
 ) {
-  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg", "operator_code"]);
+  const authz = await requireTournamentAccess(request, params.tournamentId, ["startgg", "operator_code"]);
   if (!authz.ok) return authz.response;
 
   const body = await request.json().catch(() => null);

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
 import { requireTournamentAccess } from "@/lib/authz";
+import { applySessionCookie } from "@/lib/session";
 import { generateAccessCode, hashAccessCode, maskCode, normalizeAccessCode, timingSafeEqualHex } from "@/lib/accessCode";
 
 type StoredAccessCode = {
@@ -37,11 +38,18 @@ function normalizeCodes(raw: any): StoredAccessCode[] {
     .filter((item) => item.codeHash);
 }
 
+function withRefreshedSessionCookie(response: NextResponse, authz: { refreshedSessionCookie?: { signedSession: string; maxAgeSeconds: number } }) {
+  if (authz.refreshedSessionCookie) {
+    applySessionCookie(response, authz.refreshedSessionCookie.signedSession, authz.refreshedSessionCookie.maxAgeSeconds);
+  }
+  return response;
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg"]);
+  const authz = await requireTournamentAccess(request, params.tournamentId, ["startgg"]);
   if (!authz.ok) return authz.response;
 
   try {
@@ -64,7 +72,7 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg"]);
+  const authz = await requireTournamentAccess(request, params.tournamentId, ["startgg"]);
   if (!authz.ok) return authz.response;
   const body = await request.json().catch(() => null);
   const tournamentName = normalizeAccessCode(String(body?.name || ""));
@@ -132,7 +140,7 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg"]);
+  const authz = await requireTournamentAccess(request, params.tournamentId, ["startgg"]);
   if (!authz.ok) return authz.response;
 
   const body = await request.json().catch(() => null);
@@ -212,7 +220,7 @@ export async function PATCH(
       }
     });
 
-    return NextResponse.json({ ok: true });
+    return withRefreshedSessionCookie(NextResponse.json({ ok: true }), authz);
   } catch (error: any) {
     if (error?.message === "NOT_FOUND") {
       return NextResponse.json({ error: "対象コードが見つかりません" }, { status: 404 });

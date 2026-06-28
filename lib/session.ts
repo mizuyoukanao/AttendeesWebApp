@@ -8,6 +8,7 @@ export type AppSession = {
   userId: string;
   displayName: string;
   allowedTournamentIds: string[];
+  pinnedTournamentId?: string;
   exp: number;
 };
 
@@ -40,6 +41,7 @@ export function createSignedSession(payload: Omit<AppSession, "exp"> & { exp?: n
     userId: String(payload.userId || "").trim(),
     displayName: String(payload.displayName || "").trim() || "operator",
     allowedTournamentIds: Array.from(new Set((payload.allowedTournamentIds || []).map((id) => String(id).trim()).filter(Boolean))),
+    pinnedTournamentId: payload.mode === "startgg" && payload.pinnedTournamentId ? String(payload.pinnedTournamentId) : undefined,
     exp: payload.exp ?? Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS,
   };
 
@@ -86,7 +88,7 @@ export function verifySignedSession(cookieValue: string | undefined | null): App
   }
 }
 
-export function setSessionCookie(response: NextResponse, signedSession: string, maxAgeSeconds?: number) {
+export function applySessionCookie(response: NextResponse, signedSession: string, maxAgeSeconds?: number) {
   response.cookies.set(APP_SESSION_COOKIE, signedSession, {
     httpOnly: true,
     sameSite: "lax",
@@ -95,6 +97,8 @@ export function setSessionCookie(response: NextResponse, signedSession: string, 
     maxAge: maxAgeSeconds ?? SESSION_TTL_SECONDS,
   });
 }
+
+export const setSessionCookie = applySessionCookie;
 
 export function clearSessionCookie(response: NextResponse) {
   response.cookies.set(APP_SESSION_COOKIE, "", {
