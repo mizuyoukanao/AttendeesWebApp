@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
 import { getActorFromSession, requireTournamentAccess } from "@/lib/authz";
+import { applySessionCookie } from "@/lib/session";
 
 const GRAPHQL_URL = "https://api.start.gg/gql/alpha";
 
@@ -156,11 +157,18 @@ async function claimSeatInTransaction({
   throw new Error("NO_AVAILABLE_SEAT");
 }
 
+function withRefreshedSessionCookie(response: NextResponse, authz: { refreshedSessionCookie?: { signedSession: string; maxAgeSeconds: number } }) {
+  if (authz.refreshedSessionCookie) {
+    applySessionCookie(response, authz.refreshedSessionCookie.signedSession, authz.refreshedSessionCookie.maxAgeSeconds);
+  }
+  return response;
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: { tournamentId: string; participantId: string } },
 ) {
-  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg", "operator_code"]);
+  const authz = await requireTournamentAccess(request, params.tournamentId, ["startgg", "operator_code"]);
   if (!authz.ok) return authz.response;
 
   const body = await request.json().catch(() => null);
@@ -294,10 +302,10 @@ export async function POST(
     });
 
     if (idempotent) {
-      return NextResponse.json({ ok: true, idempotent: true });
+      return withRefreshedSessionCookie(NextResponse.json({ ok: true, idempotent: true }), authz);
     }
 
-    return NextResponse.json({ ok: true, assignedSeat });
+    return withRefreshedSessionCookie(NextResponse.json({ ok: true, assignedSeat }), authz);
   } catch (error: any) {
     if (error?.message === "NOT_FOUND") {
       return NextResponse.json({ error: "参加者が存在しません" }, { status: 404 });

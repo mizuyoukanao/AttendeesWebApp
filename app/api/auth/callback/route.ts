@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSignedSession, setSessionCookie } from "@/lib/session";
-import { fetchManagedTournamentIds, fetchViewer } from "@/lib/startgg";
+import { buildSessionTournamentIds, fetchManagedTournaments, fetchViewer } from "@/lib/startgg";
 
 const TOKEN_URL = "https://api.start.gg/oauth/access_token";
 
@@ -60,7 +60,8 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "start.ggユーザー情報の取得に失敗しました" }, { status: 401 });
     }
 
-    const allowedTournamentIds = await fetchManagedTournamentIds(accessToken);
+    const managedTournaments = await fetchManagedTournaments(accessToken);
+    const { allowedTournamentIds } = buildSessionTournamentIds(managedTournaments);
     const signedSession = createSignedSession({
       mode: "startgg",
       userId: String(viewer.id),

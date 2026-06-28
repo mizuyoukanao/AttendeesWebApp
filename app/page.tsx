@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Html5QrcodeScanner } from "html5-qrcode";
 import clsx from "clsx";
 import Papa from "papaparse";
+import { BrowserQRCodeSvgWriter } from "html5-qrcode/third_party/zxing-js.umd.js";
 
 type AdjustmentOption = {
   key: string;
@@ -452,6 +453,11 @@ export default function HomePage() {
   const [manualCustomAmount, setManualCustomAmount] = useState(0);
   const [manualEntryMessage, setManualEntryMessage] = useState("");
   const [isManualEntrySubmitting, setIsManualEntrySubmitting] = useState(false);
+  const [missingQrParticipantId, setMissingQrParticipantId] = useState("");
+  const [missingQrPlayerName, setMissingQrPlayerName] = useState("");
+  const [missingQrVenueFee, setMissingQrVenueFee] = useState("");
+  const [missingQrFeeProfileKey, setMissingQrFeeProfileKey] = useState("");
+  const [isMissingQrSubmitting, setIsMissingQrSubmitting] = useState(false);
   const [venueFeeCatalog, setVenueFeeCatalog] = useState<string[]>([]);
   const [newVenueFeeName, setNewVenueFeeName] = useState("");
   const [draggingParticipantId, setDraggingParticipantId] = useState("");
@@ -485,11 +491,9 @@ export default function HomePage() {
   const hasOperatorAccess = Boolean(authSession.authenticated);
   const isStartggAuthenticated = authSession.authenticated && authSession.session?.mode === "startgg";
   const activeAccessCode = issuedAccessCode;
+  const [shareQrDataUrl, setShareQrDataUrl] = useState("");
   const shareUrl = typeof window !== "undefined" && activeAccessCode
     ? `${window.location.origin}${window.location.pathname}?tournamentId=${encodeURIComponent(tournamentId)}&code=${encodeURIComponent(activeAccessCode)}`
-    : "";
-  const shareQrUrl = shareUrl
-    ? `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(shareUrl)}`
     : "";
 
   const selectedAdjustmentOptions = useMemo(
@@ -504,6 +508,31 @@ export default function HomePage() {
     () => adjustmentOptions().filter((opt) => manualSelectedAdjustments.includes(opt.key)),
     [manualSelectedAdjustments, pricingConfig],
   );
+
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!shareUrl) {
+      setShareQrDataUrl("");
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    try {
+      const svgElement = new BrowserQRCodeSvgWriter().write(shareUrl, 220, 220);
+      svgElement.setAttribute("viewBox", "0 0 220 220");
+      const svg = new XMLSerializer().serializeToString(svgElement);
+      const dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+      if (!cancelled) setShareQrDataUrl(dataUrl);
+    } catch {
+      if (!cancelled) setShareQrDataUrl("");
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [shareUrl]);
 
   useEffect(() => {
     participantsRef.current = participants;
@@ -1209,6 +1238,10 @@ export default function HomePage() {
     const participant = participantsRef.current.find((p) => p.participantId === participantId) || null;
     if (participant) {
       setScanResult(participant);
+      setMissingQrParticipantId("");
+      setMissingQrPlayerName("");
+      setMissingQrVenueFee("");
+      setMissingQrFeeProfileKey("");
       lastScannedParticipantIdRef.current = participantId;
       setScannerError("");
       return;
@@ -1217,12 +1250,81 @@ export default function HomePage() {
     if (!options?.preserveCurrentOnFailure) {
       setScanResult(null);
     }
-    setScannerError("対象の参加者が見つかりません");
+    setMissingQrParticipantId(participantId);
+    setMissingQrPlayerName("");
+    setMissingQrVenueFee("");
+    setMissingQrFeeProfileKey("");
+    setScannerError("対象の参加者が見つかりません。枠とユーザー名を入力すると一時手動チェックインできます。");
   }
 
   function handleManualLookup() {
     handleLookup(scanRaw.trim());
   }
+
+  async function handleMissingQrManualCheckIn() {
+    if (!missingQrParticipantId) return;
+    if (!hasOperatorAccess) {
+      setScannerError("一時手動チェックインにはログインが必要です");
+      return;
+    }
+    if (!tournamentId) {
+      setScannerError("大会を選択してください");
+      return;
+    }
+    const selectedProfile = pricingConfig.feeProfiles.find((profile) => profile.key === missingQrFeeProfileKey);
+    if (!selectedProfile) {
+      setScannerError("料金テンプレートを選択してください");
+      return;
+    }
+    if (!missingQrPlayerName.trim() || !missingQrVenueFee.trim()) {
+      setScannerError("ユーザー名と枠を入力してください");
+      return;
+    }
+
+    setIsMissingQrSubmitting(true);
+    setScannerError("未登録QRを一時手動チェックインしています...");
+    try {
+      const createRes = await fetch(`/api/tournaments/${encodeURIComponent(tournamentId)}/participants/manual-entry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          participantId: missingQrParticipantId,
+          playerName: missingQrPlayerName.trim(),
+          venueFeeName: missingQrVenueFee.trim(),
+          venueFeeNames: [missingQrVenueFee.trim()],
+          baseAmount: Number(selectedProfile.amount ?? 0),
+        }),
+      });
+      const createData = await createRes.json();
+      if (!createRes.ok) throw new Error(createData?.error || createRes.statusText);
+
+      const checkinRes = await fetch(
+        `/api/tournaments/${encodeURIComponent(tournamentId)}/participants/${encodeURIComponent(missingQrParticipantId)}/checkin`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            deltaAmount: 0,
+            reasonLabel: "未登録QRから一時手動チェックイン",
+            requestId: crypto.randomUUID(),
+            requiresReason: false,
+          }),
+        },
+      );
+      const checkinData = await checkinRes.json();
+      if (!checkinRes.ok) throw new Error(checkinData?.error || checkinRes.statusText);
+      const seatSuffix = checkinData?.assignedSeat ? `（対戦台: ${checkinData.assignedSeat}）` : "";
+      setKioskMessage(`${missingQrPlayerName.trim()} を一時手動チェックインしました${seatSuffix}。CSV再アップロード時に同じIDがあればチェックイン済みとしてマージされます。`);
+      setScannerError("");
+      await fetchParticipantsSnapshot(tournamentId);
+      clearCurrentParticipant();
+    } catch (error: any) {
+      setScannerError(`一時手動チェックインに失敗しました: ${error?.message || "unknown"}`);
+    } finally {
+      setIsMissingQrSubmitting(false);
+    }
+  }
+
 
   function handleLostFoundLookup(raw: string) {
     const participantId = parseParticipantIdFromQr(raw);
@@ -1242,6 +1344,10 @@ export default function HomePage() {
 
   function clearCurrentParticipant() {
     setScanResult(null);
+    setMissingQrParticipantId("");
+    setMissingQrPlayerName("");
+    setMissingQrVenueFee("");
+    setMissingQrFeeProfileKey("");
     setScanRaw("");
     lastScannedParticipantIdRef.current = "";
     setStudentDiscount(false);
@@ -2097,6 +2203,43 @@ export default function HomePage() {
               <button className="button" onClick={handleManualLookup} disabled={!hasOperatorAccess}>参加者を照合</button>
               {scannerError && <span className="muted">{scannerError}</span>}
             </div>
+            {missingQrParticipantId && (
+              <div className="stack" style={{ marginTop: 12 }}>
+                <div className="toast">
+                  ID: {missingQrParticipantId} はCSV上の参加者一覧にありません。ユーザー名と枠を入力すると一時手動チェックインできます。
+                </div>
+                <input
+                  className="input"
+                  value={missingQrPlayerName}
+                  onChange={(e) => setMissingQrPlayerName(e.target.value)}
+                  placeholder="ユーザー名"
+                  disabled={!hasOperatorAccess || isMissingQrSubmitting}
+                />
+                <select
+                  className="select"
+                  value={missingQrFeeProfileKey}
+                  onChange={(e) => {
+                    const key = e.target.value;
+                    setMissingQrFeeProfileKey(key);
+                    const profile = pricingConfig.feeProfiles.find((item) => item.key === key);
+                    setMissingQrVenueFee(profile?.venueFeeName || "");
+                  }}
+                  disabled={!hasOperatorAccess || isMissingQrSubmitting}
+                >
+                  <option value="">料金テンプレートを選択</option>
+                  {pricingConfig.feeProfiles.map((profile) => (
+                    <option key={`missing-qr-${profile.key}`} value={profile.key}>{profile.label} / {profile.venueFeeName} / {profile.amount}円</option>
+                  ))}
+                </select>
+                {missingQrVenueFee && <div className="muted">適用枠: {missingQrVenueFee}</div>}
+                <div className="flex">
+                  <button className="button" type="button" onClick={handleMissingQrManualCheckIn} disabled={!hasOperatorAccess || isMissingQrSubmitting}>
+                    {isMissingQrSubmitting ? "登録中..." : "一時手動チェックイン"}
+                  </button>
+                  <button className="button secondary" type="button" onClick={clearCurrentParticipant} disabled={isMissingQrSubmitting}>キャンセル</button>
+                </div>
+              </div>
+            )}
             {kioskMessage && <div className="toast success" style={{ marginTop: 8 }}>{kioskMessage}</div>}
           </details>
 
@@ -2528,7 +2671,7 @@ export default function HomePage() {
                 <div className="stack">
                   <input className="input" value={shareUrl} readOnly />
                   <button className="button secondary" type="button" onClick={copyShareUrl}>共有URLをコピー</button>
-                  {shareQrUrl && <img src={shareQrUrl} alt="大会コード共有QR" style={{ width: 220, height: 220, borderRadius: 8 }} />}
+                  {shareQrDataUrl && <img src={shareQrDataUrl} alt="大会コード共有QR" style={{ width: 220, height: 220, borderRadius: 8, background: "#fff" }} />}
                 </div>
               )}
               <div className="stack">

@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
 import { requireTournamentAccess } from "@/lib/authz";
+import { applySessionCookie } from "@/lib/session";
 
 type ParticipantPayload = {
   participantId: string;
@@ -72,11 +73,18 @@ function normalizeParticipant(input: any): ParticipantPayload | null {
   };
 }
 
+function withRefreshedSessionCookie(response: NextResponse, authz: { refreshedSessionCookie?: { signedSession: string; maxAgeSeconds: number } }) {
+  if (authz.refreshedSessionCookie) {
+    applySessionCookie(response, authz.refreshedSessionCookie.signedSession, authz.refreshedSessionCookie.maxAgeSeconds);
+  }
+  return response;
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg", "operator_code"]);
+  const authz = await requireTournamentAccess(request, params.tournamentId, ["startgg", "operator_code"]);
   if (!authz.ok) return authz.response;
 
   try {
@@ -89,7 +97,7 @@ export async function GET(
       .get();
 
     const participants = participantsSnap.docs.map((doc) => toParticipantResponse(doc.id, doc.data()));
-    return NextResponse.json({ participants });
+    return withRefreshedSessionCookie(NextResponse.json({ participants }), authz);
   } catch (error: any) {
     return NextResponse.json({ error: error?.message ?? "participants取得エラー" }, { status: 500 });
   }
@@ -99,7 +107,7 @@ export async function POST(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg"]);
+  const authz = await requireTournamentAccess(request, params.tournamentId, ["startgg"]);
   if (!authz.ok) return authz.response;
 
   const body = await request.json().catch(() => null);
@@ -139,6 +147,7 @@ export async function POST(
       const preserveCheckedInAt = (existing as any)?.checkedInAt ?? null;
       const preserveCheckedInBy = (existing as any)?.checkedInBy ?? null;
       const preserveSeatLabel = String((existing as any)?.seatLabel || "").trim() || null;
+      const wasTemporaryCheckin = Boolean((existing as any)?.temporaryCheckin);
 
       bulkWriter.set(
         docRef,
@@ -159,6 +168,8 @@ export async function POST(
           checkedInAt: preserveCheckedIn ? preserveCheckedInAt : (participant.checkedIn ? FieldValue.serverTimestamp() : null),
           checkedInBy: preserveCheckedIn ? preserveCheckedInBy : null,
           seatLabel: preserveSeatLabel,
+          temporaryCheckin: false,
+          createdFrom: wasTemporaryCheckin ? "startgg_csv_merged" : ((existing as any)?.createdFrom ?? null),
           importState: {
             lastImportJobId: importJobId,
             lastImportedAt: importedAtIso,
@@ -166,6 +177,9 @@ export async function POST(
             archived: Boolean((existing as any)?.importState?.archived),
           },
           updatedAt: FieldValue.serverTimestamp(),
+          adminLogEntries: wasTemporaryCheckin
+            ? FieldValue.arrayUnion(`[${importedAtIso}] system: CSV再アップロードで一時手動チェックインをstart.gg参加者にマージ`)
+            : ((existing as any)?.adminLogEntries ?? []),
         },
         { merge: true },
       );

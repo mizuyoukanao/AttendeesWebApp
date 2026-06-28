@@ -2,12 +2,20 @@ import { NextRequest, NextResponse } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 import { ensureFirestore } from "@/lib/firebaseAdmin";
 import { getActorFromSession, requireTournamentAccess } from "@/lib/authz";
+import { applySessionCookie } from "@/lib/session";
+
+function withRefreshedSessionCookie(response: NextResponse, authz: { refreshedSessionCookie?: { signedSession: string; maxAgeSeconds: number } }) {
+  if (authz.refreshedSessionCookie) {
+    applySessionCookie(response, authz.refreshedSessionCookie.signedSession, authz.refreshedSessionCookie.maxAgeSeconds);
+  }
+  return response;
+}
 
 export async function POST(
   request: NextRequest,
   { params }: { params: { tournamentId: string } },
 ) {
-  const authz = requireTournamentAccess(request, params.tournamentId, ["startgg", "operator_code"]);
+  const authz = await requireTournamentAccess(request, params.tournamentId, ["startgg", "operator_code"]);
   if (!authz.ok) return authz.response;
 
   const body = await request.json().catch(() => null);
@@ -64,7 +72,7 @@ export async function POST(
       }, { merge: true });
     });
 
-    return NextResponse.json({ ok: true });
+    return withRefreshedSessionCookie(NextResponse.json({ ok: true }), authz);
   } catch (error: any) {
     const message = error?.message === "NOT_FOUND"
       ? "対象参加者が見つかりません"
