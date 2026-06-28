@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Html5QrcodeScanner } from "html5-qrcode";
 import clsx from "clsx";
 import Papa from "papaparse";
-import { BrowserQRCodeSvgWriter } from "html5-qrcode/third_party/zxing-js.umd.js";
+import { BrowserQRCodeSvgWriter, EncodeHintType } from "html5-qrcode/third_party/zxing-js.umd.js";
 
 type AdjustmentOption = {
   key: string;
@@ -454,6 +454,7 @@ export default function HomePage() {
   const [manualEntryMessage, setManualEntryMessage] = useState("");
   const [isManualEntrySubmitting, setIsManualEntrySubmitting] = useState(false);
   const [missingQrParticipantId, setMissingQrParticipantId] = useState("");
+  const missingQrParticipantIdRef = useRef("");
   const [missingQrPlayerName, setMissingQrPlayerName] = useState("");
   const [missingQrVenueFee, setMissingQrVenueFee] = useState("");
   const [missingQrFeeProfileKey, setMissingQrFeeProfileKey] = useState("");
@@ -520,7 +521,8 @@ export default function HomePage() {
     }
 
     try {
-      const svgElement = new BrowserQRCodeSvgWriter().write(shareUrl, 220, 220);
+      const hints = new Map<unknown, unknown>([[EncodeHintType.MARGIN, 4]]);
+      const svgElement = new BrowserQRCodeSvgWriter().write(shareUrl, 220, 220, hints);
       svgElement.setAttribute("viewBox", "0 0 220 220");
       const svg = new XMLSerializer().serializeToString(svgElement);
       const dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
@@ -539,6 +541,10 @@ export default function HomePage() {
   }, [participants]);
 
   useEffect(() => {
+    missingQrParticipantIdRef.current = missingQrParticipantId;
+  }, [missingQrParticipantId]);
+
+  useEffect(() => {
     if (activeTab !== "kiosk" || !hasOperatorAccess) {
       return undefined;
     }
@@ -551,12 +557,11 @@ export default function HomePage() {
     const scanner = new Html5QrcodeScanner(elementId, { fps: 10, qrbox: 240 }, false);
     scanner.render(
       (decoded) => {
-        setScannerError("");
         setScanRaw(decoded);
         handleLookup(decoded, { fromScanner: true, preserveCurrentOnFailure: true });
       },
       (error) => {
-        if (isIgnorableScannerError(error)) return;
+        if (missingQrParticipantIdRef.current || isIgnorableScannerError(error)) return;
         setScannerError(error);
       },
     );
