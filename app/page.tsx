@@ -485,6 +485,7 @@ export default function HomePage() {
   const [tournamentLoading, setTournamentLoading] = useState(false);
   const [tournamentMessage, setTournamentMessage] = useState("");
   const [tournamentError, setTournamentError] = useState("");
+  const [tournamentRetryAfterSeconds, setTournamentRetryAfterSeconds] = useState(0);
   const [isMobileViewport, setIsMobileViewport] = useState(false);
   const [dashboardVisibleCount, setDashboardVisibleCount] = useState(DASHBOARD_INITIAL_VISIBLE_COUNT);
   const dashboardLoadMoreRef = useRef<HTMLDivElement | null>(null);
@@ -1176,7 +1177,20 @@ export default function HomePage() {
     setTournamentError("");
   }
 
+
+  useEffect(() => {
+    if (tournamentRetryAfterSeconds <= 0) return;
+
+    const timer = window.setTimeout(() => {
+      setTournamentRetryAfterSeconds((seconds) => Math.max(0, seconds - 1));
+    }, 1000);
+
+    return () => window.clearTimeout(timer);
+  }, [tournamentRetryAfterSeconds]);
+
   async function fetchManagedTournaments() {
+    if (tournamentRetryAfterSeconds > 0) return;
+
     setTournamentLoading(true);
     setTournamentError("");
     setTournamentMessage("start.gg から大会を取得しています...");
@@ -1184,7 +1198,14 @@ export default function HomePage() {
     try {
       const res = await fetch("/api/startgg/tournaments");
       const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || res.statusText);
+      if (!res.ok) {
+        const retryAfter = Number(data?.retryAfterSeconds || res.headers.get("Retry-After") || 0);
+        if (res.status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) {
+          setTournamentRetryAfterSeconds(Math.ceil(retryAfter));
+        }
+        throw new Error(data?.error || res.statusText);
+      }
+      setTournamentRetryAfterSeconds(0);
 
       const tournaments = normalizeTournamentCache((data.tournaments as ManagedTournament[]) || []);
       const preserved = tournamentId && !tournaments.some((item) => item.id === tournamentId)
@@ -2158,8 +2179,12 @@ export default function HomePage() {
         </p>
         <div className="stack" style={{ gap: 8 }}>
           <div className="flex" style={{ gap: 8, flexWrap: "wrap" }}>
-            <button className="button" type="button" onClick={fetchManagedTournaments} disabled={!authSession.authenticated || tournamentLoading}>
-              {tournamentLoading ? "取得中..." : "start.gg から大会を取得"}
+            <button className="button" type="button" onClick={fetchManagedTournaments} disabled={!authSession.authenticated || tournamentLoading || tournamentRetryAfterSeconds > 0}>
+              {tournamentLoading
+                ? "取得中..."
+                : tournamentRetryAfterSeconds > 0
+                  ? `再取得まで ${tournamentRetryAfterSeconds}秒`
+                  : "start.gg から大会を取得"}
             </button>
             <span className="muted">ログイン済みの場合のみ取得できます</span>
           </div>

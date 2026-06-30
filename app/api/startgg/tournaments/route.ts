@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireSession } from "@/lib/session";
-import { fetchManagedTournaments } from "@/lib/startgg";
+import { fetchManagedTournaments, StartggRateLimitError } from "@/lib/startgg";
 
 export async function GET(request: NextRequest) {
   const authn = requireSession(request);
@@ -18,6 +18,13 @@ export async function GET(request: NextRequest) {
     const tournaments = await fetchManagedTournaments(accessToken);
     return NextResponse.json({ tournaments });
   } catch (error: any) {
+    if (error instanceof StartggRateLimitError) {
+      return NextResponse.json(
+        { error: error.message, retryAfterSeconds: error.retryAfterSeconds },
+        { status: 429, headers: { "Retry-After": String(error.retryAfterSeconds) } },
+      );
+    }
+
     return NextResponse.json({ error: error?.message ?? "start.gg 取得エラー" }, { status: 500 });
   }
 }

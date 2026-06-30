@@ -1,5 +1,10 @@
+import { createHash } from "crypto";
+
 const GRAPHQL_URL = "https://api.start.gg/gql/alpha";
-const PAGE_SIZE = 10;
+const PAGE_SIZE = 50;
+const TOURNAMENT_CACHE_TTL_MS = 5 * 60 * 1000;
+const RATE_LIMIT_CACHE_TTL_MS = 60 * 1000;
+const MAX_GRAPHQL_RETRIES = 2;
 
 export const MAX_SESSION_TOURNAMENTS = 100;
 
@@ -34,6 +39,26 @@ export type StartggViewer = {
   player?: { gamerTag?: string | null };
 };
 
+export class StartggRateLimitError extends Error {
+  status = 429;
+  retryAfterSeconds: number;
+
+  constructor(message: string, retryAfterSeconds: number) {
+    super(message);
+    this.name = "StartggRateLimitError";
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+type TournamentCacheEntry = {
+  expiresAt: number;
+  tournaments?: ManagedTournament[];
+  pending?: Promise<ManagedTournament[]>;
+  rateLimitedUntil?: number;
+};
+
+const managedTournamentCache = new Map<string, TournamentCacheEntry>();
+
 export type ManagedTournament = {
   id: string;
   name?: string;
@@ -43,6 +68,25 @@ export type ManagedTournament = {
   addrState?: string | null;
   countryCode?: string | null;
 };
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getRetryAfterSeconds(response: Response): number {
+  const retryAfter = response.headers.get("retry-after");
+  const parsed = retryAfter ? Number(retryAfter) : NaN;
+  if (Number.isFinite(parsed) && parsed > 0) return Math.ceil(parsed);
+  return 60;
+}
+
+function getCacheKey(accessToken: string): string {
+  return createHash("sha256").update(accessToken).digest("hex");
+}
+
+function cloneTournaments(tournaments: ManagedTournament[]): ManagedTournament[] {
+  return tournaments.map((tournament) => ({ ...tournament }));
+}
 
 function toStartAtNumber(value: unknown): number {
   const n = Number(value);
@@ -89,26 +133,47 @@ export function buildSessionTournamentIds(
 }
 
 async function requestGraphql(accessToken: string, query: string, variables?: Record<string, unknown>) {
-  const response = await fetch(GRAPHQL_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
+  let lastRateLimitRetryAfterSeconds = 60;
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`start.gg API 呼び出しに失敗しました (${response.status}): ${text}`);
+  for (let attempt = 0; attempt <= MAX_GRAPHQL_RETRIES; attempt += 1) {
+    const response = await fetch(GRAPHQL_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+
+    if (response.status === 429) {
+      lastRateLimitRetryAfterSeconds = getRetryAfterSeconds(response);
+      if (attempt < MAX_GRAPHQL_RETRIES) {
+        await sleep(Math.min(lastRateLimitRetryAfterSeconds * 1000, 2000 * (attempt + 1)));
+        continue;
+      }
+      throw new StartggRateLimitError(
+        `start.gg API のレートリミットに達しました。${lastRateLimitRetryAfterSeconds}秒ほど待ってから再取得してください。`,
+        lastRateLimitRetryAfterSeconds,
+      );
+    }
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`start.gg API 呼び出しに失敗しました (${response.status}): ${text}`);
+    }
+
+    const data = await response.json();
+    if (data?.errors?.length) {
+      throw new Error(`start.gg API エラー: ${JSON.stringify(data.errors)}`);
+    }
+
+    return data;
   }
 
-  const data = await response.json();
-  if (data?.errors?.length) {
-    throw new Error(`start.gg API エラー: ${JSON.stringify(data.errors)}`);
-  }
-
-  return data;
+  throw new StartggRateLimitError(
+    `start.gg API のレートリミットに達しました。${lastRateLimitRetryAfterSeconds}秒ほど待ってから再取得してください。`,
+    lastRateLimitRetryAfterSeconds,
+  );
 }
 
 export async function fetchViewer(accessToken: string): Promise<StartggViewer | null> {
@@ -125,7 +190,7 @@ export async function fetchManagedTournamentIds(accessToken: string): Promise<st
   return tournaments.map((t) => String(t.id));
 }
 
-export async function fetchManagedTournaments(accessToken: string): Promise<ManagedTournament[]> {
+async function fetchManagedTournamentsUncached(accessToken: string): Promise<ManagedTournament[]> {
   let page = 1;
   const allNodes: any[] = [];
   let currentUserId = "";
@@ -163,4 +228,49 @@ export async function fetchManagedTournaments(accessToken: string): Promise<Mana
 
   const deduped = Array.from(new Map(managerOnly.map((t) => [String(t.id), t])).values());
   return sortManagedTournamentsByRecency(deduped);
+}
+
+export async function fetchManagedTournaments(accessToken: string): Promise<ManagedTournament[]> {
+  const cacheKey = getCacheKey(accessToken);
+  const now = Date.now();
+  const cached = managedTournamentCache.get(cacheKey);
+
+  if (cached?.tournaments && cached.expiresAt > now) {
+    return cloneTournaments(cached.tournaments);
+  }
+
+  if (cached?.rateLimitedUntil && cached.rateLimitedUntil > now) {
+    const retryAfterSeconds = Math.ceil((cached.rateLimitedUntil - now) / 1000);
+    throw new StartggRateLimitError(
+      `start.gg API のレートリミットに達しました。${retryAfterSeconds}秒ほど待ってから再取得してください。`,
+      retryAfterSeconds,
+    );
+  }
+
+  if (cached?.pending) {
+    return cloneTournaments(await cached.pending);
+  }
+
+  const pending = fetchManagedTournamentsUncached(accessToken)
+    .then((tournaments) => {
+      managedTournamentCache.set(cacheKey, {
+        expiresAt: Date.now() + TOURNAMENT_CACHE_TTL_MS,
+        tournaments: cloneTournaments(tournaments),
+      });
+      return tournaments;
+    })
+    .catch((error) => {
+      if (error instanceof StartggRateLimitError) {
+        managedTournamentCache.set(cacheKey, {
+          expiresAt: Date.now() + RATE_LIMIT_CACHE_TTL_MS,
+          rateLimitedUntil: Date.now() + error.retryAfterSeconds * 1000,
+        });
+      } else {
+        managedTournamentCache.delete(cacheKey);
+      }
+      throw error;
+    });
+
+  managedTournamentCache.set(cacheKey, { expiresAt: now + TOURNAMENT_CACHE_TTL_MS, pending });
+  return cloneTournaments(await pending);
 }
