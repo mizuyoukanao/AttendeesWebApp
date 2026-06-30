@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
 
 const GRAPHQL_URL = "https://api.start.gg/gql/alpha";
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 10;
 const TOURNAMENT_CACHE_TTL_MS = 5 * 60 * 1000;
 const RATE_LIMIT_CACHE_TTL_MS = 60 * 1000;
 const MAX_GRAPHQL_RETRIES = 2;
@@ -11,21 +11,13 @@ export const MAX_SESSION_TOURNAMENTS = 100;
 const VIEWER_QUERY = `query Viewer { currentUser { id slug name player { gamerTag } } }`;
 
 const MANAGED_TOURNAMENTS_QUERY = `
-  query ManagedTournaments($page: Int!, $perPage: Int!, $roles: [String!]) {
+  query ManagedTournaments($page: Int!, $perPage: Int!) {
     currentUser {
-      id
       tournaments(query: { page: $page, perPage: $perPage }) {
         nodes {
           id
           name
-          slug
           startAt
-          city
-          addrState
-          countryCode
-          admins(roles: $roles) {
-            id
-          }
         }
       }
     }
@@ -62,11 +54,7 @@ const managedTournamentCache = new Map<string, TournamentCacheEntry>();
 export type ManagedTournament = {
   id: string;
   name?: string;
-  slug?: string;
   startAt?: number | null;
-  city?: string | null;
-  addrState?: string | null;
-  countryCode?: string | null;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -193,40 +181,26 @@ export async function fetchManagedTournamentIds(accessToken: string): Promise<st
 async function fetchManagedTournamentsUncached(accessToken: string): Promise<ManagedTournament[]> {
   let page = 1;
   const allNodes: any[] = [];
-  let currentUserId = "";
-
   while (true) {
     const data = await requestGraphql(accessToken, MANAGED_TOURNAMENTS_QUERY, {
       page,
       perPage: PAGE_SIZE,
-      roles: ["admin", "manager", "bracketManager"],
     });
 
-    const currentUser = data?.data?.currentUser;
-    const nodes = currentUser?.tournaments?.nodes ?? [];
+    const nodes = data?.data?.currentUser?.tournaments?.nodes ?? [];
 
-    if (!currentUserId) currentUserId = String(currentUser?.id || "");
     allNodes.push(...nodes);
     if (nodes.length < PAGE_SIZE) break;
     page += 1;
   }
 
-  const managerOnly = allNodes
-    .filter((tournament) => {
-      const admins = Array.isArray(tournament?.admins) ? tournament.admins : [];
-      return admins.some((admin: any) => String(admin?.id || "") === currentUserId);
-    })
-    .map((tournament) => ({
-      id: String(tournament.id),
-      name: tournament.name,
-      slug: tournament.slug,
-      startAt: toStartAtNumber(tournament.startAt),
-      city: tournament.city,
-      addrState: tournament.addrState,
-      countryCode: tournament.countryCode,
-    }));
+  const tournaments = allNodes.map((tournament) => ({
+    id: String(tournament.id),
+    name: tournament.name,
+    startAt: toStartAtNumber(tournament.startAt),
+  }));
 
-  const deduped = Array.from(new Map(managerOnly.map((t) => [String(t.id), t])).values());
+  const deduped = Array.from(new Map(tournaments.map((t) => [String(t.id), t])).values());
   return sortManagedTournamentsByRecency(deduped);
 }
 
