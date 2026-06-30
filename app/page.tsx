@@ -458,6 +458,9 @@ export default function HomePage() {
   const [missingQrPlayerName, setMissingQrPlayerName] = useState("");
   const [missingQrVenueFee, setMissingQrVenueFee] = useState("");
   const [missingQrFeeProfileKey, setMissingQrFeeProfileKey] = useState("");
+  const [missingQrSelectedAdjustments, setMissingQrSelectedAdjustments] = useState<string[]>([defaultPricingConfig.adjustmentOptions[0].key]);
+  const [missingQrCustomReason, setMissingQrCustomReason] = useState("");
+  const [missingQrCustomAmount, setMissingQrCustomAmount] = useState(0);
   const [isMissingQrSubmitting, setIsMissingQrSubmitting] = useState(false);
   const [venueFeeCatalog, setVenueFeeCatalog] = useState<string[]>([]);
   const [newVenueFeeName, setNewVenueFeeName] = useState("");
@@ -509,6 +512,10 @@ export default function HomePage() {
   const manualAdjustmentOptions = useMemo(
     () => adjustmentOptions().filter((opt) => manualSelectedAdjustments.includes(opt.key)),
     [manualSelectedAdjustments, pricingConfig],
+  );
+  const missingQrAdjustmentOptions = useMemo(
+    () => adjustmentOptions().filter((opt) => missingQrSelectedAdjustments.includes(opt.key)),
+    [missingQrSelectedAdjustments, pricingConfig],
   );
 
 
@@ -807,6 +814,10 @@ export default function HomePage() {
       return filtered.length ? filtered : [fallback];
     });
     setManualSelectedAdjustments((prev) => {
+      const filtered = prev.filter((key) => available.has(key));
+      return filtered.length ? filtered : [fallback];
+    });
+    setMissingQrSelectedAdjustments((prev) => {
       const filtered = prev.filter((key) => available.has(key));
       return filtered.length ? filtered : [fallback];
     });
@@ -1268,6 +1279,9 @@ export default function HomePage() {
       setMissingQrPlayerName("");
       setMissingQrVenueFee("");
       setMissingQrFeeProfileKey("");
+      setMissingQrSelectedAdjustments([pricingConfig.adjustmentOptions[0]?.key || "none"]);
+      setMissingQrCustomReason("");
+      setMissingQrCustomAmount(0);
       lastScannedParticipantIdRef.current = participantId;
       setScannerError("");
       return;
@@ -1280,6 +1294,9 @@ export default function HomePage() {
     setMissingQrPlayerName("");
     setMissingQrVenueFee("");
     setMissingQrFeeProfileKey("");
+    setMissingQrSelectedAdjustments([pricingConfig.adjustmentOptions[0]?.key || "none"]);
+    setMissingQrCustomReason("");
+    setMissingQrCustomAmount(0);
     setScannerError("対象の参加者が見つかりません。枠とユーザー名を入力すると一時手動チェックインできます。");
   }
 
@@ -1306,6 +1323,21 @@ export default function HomePage() {
       setScannerError("ユーザー名と枠を入力してください");
       return;
     }
+    if (missingQrAdjustmentOptions.some((opt) => opt.requiresReason) && (!missingQrCustomReason.trim() || missingQrCustomAmount === 0)) {
+      setScannerError("「その他」選択時は理由と増減金額が必要です");
+      return;
+    }
+
+    const deltaAmount = missingQrAdjustmentOptions.reduce(
+      (sum, opt) => sum + (opt.key === "other" ? missingQrCustomAmount : opt.deltaAmount),
+      0,
+    );
+    const reasonLabel = [
+      "未登録QRから一時手動チェックイン",
+      ...missingQrAdjustmentOptions
+        .filter((opt) => opt.key !== "none")
+        .map((opt) => (opt.key === "other" ? `その他: ${missingQrCustomReason}` : opt.label)),
+    ].join(" / ");
 
     setIsMissingQrSubmitting(true);
     setScannerError("未登録QRを一時手動チェックインしています...");
@@ -1330,10 +1362,10 @@ export default function HomePage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            deltaAmount: 0,
-            reasonLabel: "未登録QRから一時手動チェックイン",
+            deltaAmount,
+            reasonLabel,
             requestId: crypto.randomUUID(),
-            requiresReason: false,
+            requiresReason: missingQrAdjustmentOptions.some((opt) => opt.requiresReason),
           }),
         },
       );
@@ -1374,6 +1406,9 @@ export default function HomePage() {
     setMissingQrPlayerName("");
     setMissingQrVenueFee("");
     setMissingQrFeeProfileKey("");
+    setMissingQrSelectedAdjustments([pricingConfig.adjustmentOptions[0]?.key || "none"]);
+    setMissingQrCustomReason("");
+    setMissingQrCustomAmount(0);
     setScanRaw("");
     lastScannedParticipantIdRef.current = "";
     setStudentDiscount(false);
@@ -2234,7 +2269,11 @@ export default function HomePage() {
               {scannerError && <span className="muted">{scannerError}</span>}
             </div>
             {missingQrParticipantId && (
-              <div className="stack" style={{ marginTop: 12 }}>
+              <div className={clsx("stack missing-qr-panel", { "overlay-card": compactKiosk })} style={{ marginTop: 12 }}>
+                <div className="flex-between">
+                  <div className="section-title" style={{ fontSize: 18 }}>未登録IDの一時手動チェックイン</div>
+                  {compactKiosk && <button className="button secondary" type="button" onClick={clearCurrentParticipant} disabled={isMissingQrSubmitting}>閉じる</button>}
+                </div>
                 <div className="toast">
                   ID: {missingQrParticipantId} はCSV上の参加者一覧にありません。ユーザー名と枠を入力すると一時手動チェックインできます。
                 </div>
@@ -2262,6 +2301,29 @@ export default function HomePage() {
                   ))}
                 </select>
                 {missingQrVenueFee && <div className="muted">適用枠: {missingQrVenueFee}</div>}
+
+                <label className="label">追加調整（複数選択可）</label>
+                <div className="stack">
+                  {adjustmentOptions().map((opt) => (
+                    <label key={`missing-qr-adjustment-${opt.key}`} className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <input
+                        type="checkbox"
+                        checked={missingQrSelectedAdjustments.includes(opt.key)}
+                        onChange={() => toggleAdjustment(opt.key, setMissingQrSelectedAdjustments)}
+                        disabled={!hasOperatorAccess || isMissingQrSubmitting}
+                      />
+                      {opt.label}
+                    </label>
+                  ))}
+                </div>
+
+                {missingQrAdjustmentOptions.some((opt) => opt.requiresReason) && (
+                  <div className="stack">
+                    <input className="input" value={missingQrCustomReason} onChange={(e) => setMissingQrCustomReason(e.target.value)} placeholder="変更理由" disabled={!hasOperatorAccess || isMissingQrSubmitting} />
+                    <input className="input" type="number" value={missingQrCustomAmount} onChange={(e) => setMissingQrCustomAmount(Number(e.target.value))} placeholder="増減金額" disabled={!hasOperatorAccess || isMissingQrSubmitting} />
+                  </div>
+                )}
+
                 <div className="flex">
                   <button className="button" type="button" onClick={handleMissingQrManualCheckIn} disabled={!hasOperatorAccess || isMissingQrSubmitting}>
                     {isMissingQrSubmitting ? "登録中..." : "一時手動チェックイン"}

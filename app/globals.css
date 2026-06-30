@@ -362,6 +362,14 @@ header {
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
 }
 
+
+.missing-qr-panel {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  background: rgba(15, 23, 42, 0.72);
+}
+
 @media (max-height: 520px) and (min-aspect-ratio: 21/9) {
   .kiosk-compact {
     grid-template-columns: 1fr;
